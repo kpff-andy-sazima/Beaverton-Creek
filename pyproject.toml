@@ -1,0 +1,21 @@
+[project]
+name = "beaverton-creek"
+version = "0.1.0"
+description = "Calculations for Beaverton Creek"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "forallpeople",
+    "handcalcs",
+    "ipython",
+    "jupyter",
+    "matplotlib",
+    "numpy",
+    "polars",
+    "PyniteFEA[all]",
+    "sectionproperties",
+    "scipy",
+]
+
+[dependency-groups]
+dev = ["mypy", "ruff"]
