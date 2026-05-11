@@ -11,10 +11,13 @@ dependencies = [
     "jupyter",
     "matplotlib",
     "numpy",
+    "pandas",
+    "pandas-stubs",
     "polars",
     "PyniteFEA[all]",
     "sectionproperties",
     "scipy",
+    "sympy" 
 ]
 
 [dependency-groups]
