@@ -1,7 +1,0 @@
-#!/usr/bin/bash
-
-time { \
-    export NBCONVERT=1; \
-    jupyter nbconvert --no-input --execute --to pdf --template-file report $1; \
-    unset NBCONVERT; \
-}

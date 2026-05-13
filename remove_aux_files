@@ -1,0 +1,4 @@
+#!/usr/bin/bash
+
+rm -f building_*.{aux,fdb_latexmk,fls,log,out,toc,synctex.gz}
+
