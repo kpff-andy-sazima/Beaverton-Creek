@@ -1,8 +1,0 @@
-#!/usr/bin/bash
-
-time { \
-    export NBCONVERT=1; \
-    # jupyter nbconvert --no-input --execute --to $1 --template-file report building_${3}_${2}.ipynb; \
-    jupyter nbconvert --no-input --execute --to $1 building_${3}_${2}.ipynb; \
-    unset NBCONVERT; \
-}
