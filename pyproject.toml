@@ -8,12 +8,12 @@ dependencies = [
     "forallpeople",
     "handcalcs",
     "ipython",
+    "ipykernel<7",
     "jupyter",
     "matplotlib",
     "numpy",
     "pandas",
     "pandas-stubs",
-    "polars",
     "PyniteFEA[all]",
     "sectionproperties",
     "scipy",
@@ -25,3 +25,6 @@ dev = ["mypy", "ruff"]
 
 [tool.ruff.lint]
 ignore = ["F821"]
+
+[tool.ruff]
+line-length = 120
