@@ -1,3 +1,9 @@
+# Other docs
+excel
+documents
+*.xlsx
+*.xlsm
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
