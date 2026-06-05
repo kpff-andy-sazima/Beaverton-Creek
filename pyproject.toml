@@ -6,7 +6,6 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "forallpeople",
-    "handcalcs",
     "ipython",
     "ipykernel<7",
     "jupyter",
@@ -17,8 +16,15 @@ dependencies = [
     "PyniteFEA[all]",
     "sectionproperties",
     "scipy",
-    "sympy" 
+    "sympy",
+    # local packages
+    "handcalcs",
+    "structural_tools",
 ]
+
+[tool.uv.sources]
+structural_tools = { path = "../dev/structural_tools", editable = true }
+handcalcs = { path = "../dev/handcalcs", editable = true }
 
 [dependency-groups]
 dev = ["mypy", "ruff"]
