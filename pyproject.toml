@@ -16,6 +16,7 @@ dependencies = [
     "PyniteFEA[all]",
     "sectionproperties",
     "scipy",
+    "steelpy",
     "sympy",
     # local packages
     "handcalcs",
