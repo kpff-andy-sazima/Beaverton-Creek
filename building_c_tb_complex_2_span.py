@@ -1,0 +1,669 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.19.4
+#   kernelspec:
+#     display_name: beaverton-creek
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# ---
+# title: Building C Transfer Beams and Posts in C-8 to C-Z Area
+# project: Beaverton Creak Apartments
+# location: Beaverton, OR
+# client: GBD Architects
+# job_number: 10022500446
+# author:
+#   name: Andy Sazima
+#   initials: AGS
+#   email: andy.sazima@kpff.com
+# ---
+
+
+# %%
+# %reset -f
+from copy import deepcopy
+from math import sqrt
+
+import forallpeople as units
+import handcalcs
+
+try:
+    import handcalcs.render
+except AttributeError:
+    pass
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+# import polars as pl
+import pandas as pd
+import sympy as sp
+from Pynite import FEModel3D
+from steelpy import aisc
+from structural_tools.notebook.calculation import check_value, set_params_columns
+from structural_tools.notebook.calculation import feet_inches as fi
+from structural_tools.notebook.display import display_math, display_table, display_text, sig_figs
+from structural_tools.notebook.plotting import plot_internal_diagram, set_plot_style
+from structural_tools.steel import calculate_critical_stress
+
+# %%
+units.environment(env_name="structural", top_level=True)
+handcalcs.set_option("custom_symbols", {"__": ",", "plus": "+", "minus": "-"})
+handcalcs.set_option("greek_exclusions", ["psi"])
+handcalcs.set_option("display_precision", 4)
+handcalcs.set_option("param_columns", 1)
+handcalcs.set_option("latex_block_start", "\\begin{equation*}")
+handcalcs.set_option("latex_block_end", "\\end{equation*}")
+set_plot_style()
+
+# %%
+IDENTIFIER = "c_complex_2_span"
+GENERATE_NEW_IMAGES = True
+
+# %% [markdown]
+"""
+# Flush beam and post analysis
+
+## Loading
+
+We have the following loading conditions:
+"""
+# %%
+set_params_columns(6)
+
+# %%
+# %%render params
+DL = 28.5 * psf
+LL = 40 * psf
+
+# %% [markdown]
+"""
+Since we are designing interior beams, live load reduction according to ASCE 7 Section 4.7 will apply. Each beam will have a different reduction factor, but the following applies:
+
+1. Interior beam $\rightarrow K_{LL} = 2$ (ASCE 7 Table 4.7-1)
+2. The transfer beams all support at least 2 floors $\rightarrow L_{red} \geq 0.4 L_o = L_{red,limit}$ (ASCE 7 Sec. 4.7.2)
+"""
+
+# %%
+K_LL = 2
+L_red__limit = 0.4 * LL
+
+# %% [markdown]
+"""
+We will assume that the top flanges are fully braced by the floor (no LTB).
+
+We will first try to design this beam with a single span. If that does not work, we will use 2 spans with a post in the center wall. Dimensions of the problem are shown in \autoref{fig:a_tb_1}.
+
+![Tributary diagram of the beam in question](images/c_tb_complex.png){width=50% #fig:a_tb_1}
+
+We will assume that the top flanges are fully braced by the floor (no LTB).
+"""
+
+# %% [markdown]
+"""
+## Beam
+
+The beam loading and geometry are as follows
+"""
+
+# %%
+# %%render
+w_trib__1 = fi(6, 11) / 2 * ft
+w_trib__2 = fi(13, 1) / 2 * ft
+w_trib__3 = fi(23, 6) / 2 * ft
+l_beam = fi(25, 3) * ft
+l_trib__1 = fi(7, 4) * ft
+l_trib__2 = l_beam - l_trib__1
+l_trib__3 = l_beam
+n_levels__2 = 1
+n_levels__35 = 3
+n_levels = n_levels__2 + n_levels__35
+
+# %%
+# %%render
+A_trib = (w_trib__1 * l_trib__1) + (w_trib__2 * l_trib__2) + (w_trib__3 * l_trib__3) * n_levels
+
+# %% [markdown]
+"""
+# We can check if the live load can be reduced.
+"""
+
+# %%
+# %%render
+# fmt: off
+if A_trib * K_LL >= 400 * ft * ft: L_red = LL * (0.25 + 15 / sqrt(K_LL * A_trib))
+else: L_red = LL
+# fmt: on
+
+# %%
+# %%render
+# fmt: off
+if L_red >= L_red__limit: L_red = L_red
+else: L_red = L_red__limit
+# fmt: on
+
+# %% [markdown]
+"""
+The governing load combinations will be:
+
+Strength
+
+1. $1.4 D$
+2. $1.2 D + 1.6 L$
+
+Service
+
+1. $L$
+
+This means the load cases are:
+"""
+
+# %%
+# %%render params
+D = DL
+L = L_red
+
+# %%
+# %%render
+D_line_1 = D * w_trib__1
+D_line_2 = D * w_trib__2
+D_line_3 = D * w_trib__3
+L_line_1 = L * w_trib__1
+L_line_2 = L * w_trib__2
+L_line_3 = L * w_trib__3
+
+# %% [markdown]
+"""
+There is also dead load from the interior walls directly on top of the beam.
+"""
+
+# %%
+# %%render
+W_wall = 10 * psf
+h_wall = 10.5 * ft
+D_wall = W_wall * h_wall
+
+# %% [markdown]
+"""
+Along with the self weight of the beam, which will be automatically incorporated in the analysis.
+"""
+
+# %% [markdown]
+"""
+We must also consider the point loads of the outriggers that support the building overhang. These overhangs are resolved by (a) joists that cantilever the 1'-0" overhang and frame into (b) deeper LVLs that frame into the transfer beam. 
+
+The worst-case downwards point loads given in calculations by others for J-5 are as follows:
+"""
+
+# %%
+# %%render
+D_point__J5 = 651 * lb
+L_point__J5 = 1353 * lb
+S_point__J5 = 320 * lb
+
+# %% [markdown]
+"""
+This transfer beam also takes loads from a similarly, but not identically, loaded flush beam. This point load will be derived from point loads given by others for the outriggers that frame into it, then a simple analysis will obtain the point loads from the flush beam. Note that these J-7 outriggers only have uplift snow loading due to the roof trusses not framing into these outriggers, so only dead and live loads are analyzed.
+
+The worst-case downwards point loads given in calculations by others for the flush beam are as follows:
+"""
+
+# %%
+# %%render
+D_point__J7 = 17.8 * lb
+L_point__J7 = 60.3 * lb
+
+# %%
+# %%render
+s_outriggers = 8 / 12 * ft
+D_unif__FB = D_point__J7 / s_outriggers
+L_unif__FB = L_point__J7 / s_outriggers
+
+# %%
+# %%render
+l_fb = w_trib__3 * 2
+D_point__FB = D_unif__FB * l_fb / 2
+L_point__FB = L_unif__FB * l_fb / 2
+
+# %% [markdown]
+"""
+There is also a point load from the other transfer beam (labeled as a W12x50 in \autoref{fig:a_tb_1}). This transfer beam only takes the weight of the walls above. No joists frame into these walls or this other transfer beam, so we can use known equations for the reaction of a simply supported beam with a partial distributed load.
+"""
+
+# %%
+# %%render
+l_tb = fi(13, 1) * ft
+l_wall = l_tb - fi(6, 11) * ft
+P_wall = (n_levels * D_wall) * l_wall**2 / 2 / l_tb
+
+# %% [markdown]
+"""
+The joists on level 2 frame directly into the transfer beam, but the joists on levels 3--5 frame into short segments of bearing wall and flush beam headers that transfer loads to posts in the ends of the bearing walls. We must get these point loads from the flush beams.
+
+For simplicity, we will get the point loads from the longest of the 4 flush beams as they only vary in length by a couple feet.
+"""
+
+# %%
+# %%render
+l_header = fi(12 - 7, 11 - 7) * ft
+w_header = w_trib__2 + w_trib__3
+D_point__header = (D_line_2 + D_line_3) * l_header / 2
+L_point__header = (L_line_2 + L_line_3) * l_header / 2
+
+# %%
+# Initialize FE Model
+base_model = FEModel3D()
+
+# Materials
+E = 29000  # Modulus of elasticity (ksi)
+Fy = 50  # Yield stress (ksi)
+nu = 0.3  # Poisson's ratio
+G = E / (2 * (1 + nu))  # Shear modulus of elasticity (ksi)
+rho = 489 / (12**3) / 1000  # Density (kci)
+steel = base_model.add_material(name="steel", E=E, G=G, nu=nu, rho=rho, fy=Fy)
+
+# Load combinations
+base_model.add_load_combo("1a", {"D": 1.4}, ["strength"])
+base_model.add_load_combo("2a-1", {"D": 1.2, "L": 1.6, "L_r": 0.5}, ["strength"])
+base_model.add_load_combo("2a-2", {"D": 1.2, "L": 1.6, "S": 0.3}, ["strength"])
+base_model.add_load_combo("3a-1", {"D": 1.2, "L_r": 1.6, "L": 1.0}, ["strength"])
+base_model.add_load_combo("3a-2", {"D": 1.2, "S": 1.0, "L": 1.0}, ["strength"])
+base_model.add_load_combo("3a-3", {"D": 1.2, "L_r": 1.6, "W": 0.5}, ["strength"])
+base_model.add_load_combo("3a-4", {"D": 1.2, "S": 1.0, "W": 0.5}, ["strength"])
+# base_model.add_load_combo("4a-1", {"D": 1.2, "W": 1.0, "L": 1.0, "L_r": 0.5}, ["strength"])
+# base_model.add_load_combo("4a-2", {"D": 1.2, "W": 1.0, "L": 1.0, "S": 0.3}, ["strength"])
+# base_model.add_load_combo("5a", {"D": 0.9, "W": -1.0}, ["strength"])
+# base_model.add_load_combo("6", {"D": 1.2, "E_v": 1.0, "E_h": 1.0, "L": 1.0, "S": 0.15}, ["strength"])
+# base_model.add_load_combo("7", {"D": 0.9, "E_v": -1.0, "E_h": 1.0}, ["strength"])
+base_model.add_load_combo("L", {"L": 1}, ["service"])
+base_model.add_load_combo("L_r", {"L_r": 1}, ["service"])
+base_model.add_load_combo("S", {"S": 1}, ["service"])
+# base_model.add_load_combo("W", {"W": 1}, ["service"])
+# base_model.add_load_combo("0.5D+L", {"D": 0.5, "L": 1}, ["service OSSC25 wood"])
+# base_model.add_load_combo("CC.2-1a", {"D": 1, "L": 1}, ["service ASCE7-22"])
+# base_model.add_load_combo("CC.2-1b", {"D": 1, "S_ser": 1}, ["service ASCE7-22"])
+# base_model.add_load_combo("CC.2-2", {"D": 1, "L": 0.5}, ["creep ASCE7-22"])
+base_model.add_load_combo("D", {"D": 1}, ["self weight"])
+base_model.add_load_combo(
+    "all_nominal", {"D": 1, "L": 1, "L_r": 1, "S": 1, "W": 1, "E_h": 1, "E_v": 1}, ["all_nominal"]
+)
+
+# %%
+tb_1_steel = deepcopy(base_model)
+
+x0 = 0
+x1 = fi(4, 1, return_unit="in")
+x2 = fi(7, 7, return_unit="in")
+x3 = fi(12, 11, return_unit="in")
+x4 = fi(16, 9, return_unit="in")
+x5 = fi(19, 10, return_unit="in")
+x6 = fi(22, 10, return_unit="in")
+x_post = fi(11, 3, return_unit="in")
+x_end = float(l_beam.to("inch"))
+x_tb = fi(7, 4, return_unit="in")
+x_fb = x_end - fi(8, 4, return_unit="in")
+x_j5 = x_end - fi(6, 3, return_unit="in")
+
+# Nodes
+tb_1_steel.add_node("n1", x0, 0, 0)
+tb_1_steel.add_node("n2", x_end, 0, 0)
+tb_1_steel.add_node("n3", x1, 0, 0)
+tb_1_steel.add_node("n4", x2, 0, 0)
+tb_1_steel.add_node("n5", x3, 0, 0)
+tb_1_steel.add_node("n6", x4, 0, 0)
+tb_1_steel.add_node("n7", x5, 0, 0)
+tb_1_steel.add_node("n8", x6, 0, 0)
+tb_1_steel.add_node("n_post", x_post, 0, 0)
+tb_1_steel.add_node("n_tb", x_tb, 0, 0)
+tb_1_steel.add_node("n_fb", x_fb, 0, 0)
+tb_1_steel.add_node("n_j5", x_j5, 0, 0)
+
+# Wide flange shape
+wf = aisc.W_shapes.W14X30
+display_text(f"Try a {wf.name}")
+
+# Add a section with the following properties:
+tb_1_steel.add_section(
+    "wf",
+    A=wf.area,
+    Iy=wf.Iy,
+    Iz=wf.Ix,
+    J=wf.J,
+)
+
+# Add a member
+tb_1_steel.add_member("m1", "n1", "n2", "steel", "wf")
+
+# Provide simple supports
+tb_1_steel.def_support("n1", True, True, True, False, False, False)
+tb_1_steel.def_support("n2", False, True, True, True, False, False)
+tb_1_steel.def_support("n_post", False, True, True, True, False, False)
+
+# Uniform loads
+# level 2
+dead_load_1 = float(D_line_1.to("kip_in"))
+dead_load_2 = float(D_line_2.to("kip_in"))
+dead_load_3 = float(D_line_3.to("kip_in"))
+live_load_1 = float(L_line_1.to("kip_in"))
+live_load_2 = float(L_line_2.to("kip_in"))
+live_load_3 = float(L_line_3.to("kip_in"))
+tb_1_steel.add_member_dist_load("m1", "Fy", -dead_load_1, -dead_load_1, x1=x0, x2=x_tb, case="D")  # from J1
+tb_1_steel.add_member_dist_load("m1", "Fy", -live_load_1, -live_load_1, x1=x0, x2=x_tb, case="L")  # from J1
+tb_1_steel.add_member_dist_load("m1", "Fy", -dead_load_2, -dead_load_2, x1=x_tb, x2=x_j5, case="D")  # from J1
+tb_1_steel.add_member_dist_load("m1", "Fy", -live_load_2, -live_load_2, x1=x_tb, x2=x_j5, case="L")  # from J1
+tb_1_steel.add_member_dist_load("m1", "Fy", -dead_load_3, -dead_load_3, x1=x0, x2=x_fb, case="D")  # from J6
+tb_1_steel.add_member_dist_load("m1", "Fy", -live_load_3, -live_load_3, x1=x0, x2=x_fb, case="L")  # from J6
+
+# levels 3-5
+tb_1_steel.add_member_dist_load(
+    "m1", "Fy", -3 * (dead_load_1 + dead_load_3), -3 * (dead_load_1 + dead_load_3), x1=x0, x2=x1, case="D"
+)
+tb_1_steel.add_member_dist_load(
+    "m1", "Fy", -3 * (dead_load_2 + dead_load_3), -3 * (dead_load_2 + dead_load_3), x1=x4, x2=x5, case="D"
+)
+tb_1_steel.add_member_dist_load(
+    "m1", "Fy", -3 * (dead_load_2 + dead_load_3), -3 * (dead_load_2 + dead_load_3), x1=x6, x2=x_end, case="D"
+)
+tb_1_steel.add_member_dist_load(
+    "m1", "Fy", -3 * (live_load_1 + live_load_3), -3 * (live_load_1 + live_load_3), x1=x0, x2=x1, case="L"
+)
+tb_1_steel.add_member_dist_load(
+    "m1", "Fy", -3 * (live_load_2 + live_load_3), -3 * (live_load_2 + live_load_3), x1=x4, x2=x5, case="L"
+)
+tb_1_steel.add_member_dist_load(
+    "m1", "Fy", -3 * (live_load_2 + live_load_3), -3 * (live_load_2 + live_load_3), x1=x6, x2=x_end, case="L"
+)
+
+# levels 2, 3, 4, 5
+wall_dead_load = n_levels * float(D_wall.to("kip_in"))
+tb_1_steel.add_member_dist_load("m1", "Fy", -wall_dead_load, -wall_dead_load, x1=x0, x2=x1, case="D")
+tb_1_steel.add_member_dist_load("m1", "Fy", -wall_dead_load, -wall_dead_load, x1=x4, x2=x5, case="D")
+tb_1_steel.add_member_dist_load("m1", "Fy", -wall_dead_load, -wall_dead_load, x1=x6, x2=x_end, case="D")
+
+tb_1_steel.add_member_self_weight("FY", -1, case="D")
+
+# Point loads
+tb_1_steel.add_node_load("n_j5", "FY", -float(D_point__J5.to("kip")), "D")
+tb_1_steel.add_node_load("n_j5", "FY", -float(L_point__J5.to("kip")), "L")
+tb_1_steel.add_node_load("n_j5", "FY", -float(S_point__J5.to("kip")), "S")
+tb_1_steel.add_node_load("n_tb", "FY", -float(P_wall.to("kip")), "D")
+tb_1_steel.add_node_load("n_fb", "FY", -float(D_point__FB.to("kip")), "D")
+tb_1_steel.add_node_load("n_fb", "FY", -float(L_point__FB.to("kip")), "L")
+tb_1_steel.add_node_load("n3", "FY", -float(n_levels * D_point__header.to("kip")), "D")
+tb_1_steel.add_node_load("n4", "FY", -float(2 * n_levels * D_point__header.to("kip")), "D")
+tb_1_steel.add_node_load("n5", "FY", -float(2 * n_levels * D_point__header.to("kip")), "D")
+tb_1_steel.add_node_load("n6", "FY", -float(n_levels * D_point__header.to("kip")), "D")
+tb_1_steel.add_node_load("n7", "FY", -float(n_levels * D_point__header.to("kip")), "D")
+tb_1_steel.add_node_load("n8", "FY", -float(n_levels * D_point__header.to("kip")), "D")
+tb_1_steel.add_node_load("n3", "FY", -float(n_levels * L_point__header.to("kip")), "L")
+tb_1_steel.add_node_load("n4", "FY", -float(2 * n_levels * L_point__header.to("kip")), "L")
+tb_1_steel.add_node_load("n5", "FY", -float(2 * n_levels * L_point__header.to("kip")), "L")
+tb_1_steel.add_node_load("n6", "FY", -float(n_levels * L_point__header.to("kip")), "L")
+tb_1_steel.add_node_load("n7", "FY", -float(n_levels * L_point__header.to("kip")), "L")
+tb_1_steel.add_node_load("n8", "FY", -float(n_levels * L_point__header.to("kip")), "L")
+
+# Analyze the beam
+tb_1_steel.analyze()
+
+# %%
+if GENERATE_NEW_IMAGES:
+    # from Pynite.Rendering import Renderer  # or Pynite.Visualization
+    import vtk
+    from Pynite.Visualization import Renderer  # or Pynite.Visualization
+
+    # Create renderer
+    renderer = Renderer(tb_1_steel)
+
+    combo_name = "all_nominal"
+    renderer.combo_name = combo_name
+    renderer.window.SetSize(1920, 540)
+
+    renderer.theme = "print"
+    renderer.annotation_size = 3
+    renderer.update()
+    renderer.renderer.ResetCamera()
+    camera = renderer.renderer.GetActiveCamera()
+    camera.Zoom(3.25)
+    actors = renderer.renderer.GetActors()
+    actors.InitTraversal()
+    for i in range(0, actors.GetNumberOfItems()):
+        actor = actors.GetNextActor()
+        if i >= 4:
+            if actor.GetClassName() == "vtkFollower":
+                actor.GetProperty().SetColor(0, 0.75, 0)  # red labels
+    renderer.window.Render()
+
+    w2if = vtk.vtkWindowToImageFilter()
+    w2if.SetInput(renderer.window)
+    w2if.SetInputBufferTypeToRGB()
+    w2if.ReadFrontBufferOff()
+
+    writer = vtk.vtkPNGWriter()
+    writer.SetInputConnection(w2if.GetOutputPort())
+    writer.SetFileName(f"images/{IDENTIFIER}_tb_1_steel_loading_{combo_name}.png")
+    writer.Write()
+
+    # Now that we're done with the render window, finalize it
+    renderer.window.Finalize()
+
+    # Save result
+    # renderer.screenshot("images/tb_1_steel_loading.png", interact=False, reset_camera=False)
+
+# %% [markdown]
+"""
+See the beam loading in \autoref{fig:tb_a_1_loading_1_span_all_nominal}.
+
+- Note that all units are in kips and inches.
+
+![All nominal loads](images/c_complex_2_span_tb_1_steel_loading_all_nominal.png){width=100% #fig:tb_a_1_loading_2_span_all_nominal}
+"""
+
+# %%
+member = tb_1_steel.members["m1"]
+moments_list = []
+labels_list = []
+strength_combos = [combo for combo in tb_1_steel.load_combos.values() if "strength" in combo.combo_tags]
+for combo in strength_combos:
+    x, M = member.moment_array("Mz", 100, combo_name=combo.name)
+    moments_list += [M]
+    combo_str = "$" + " + ".join(f"{factor}{load}" for load, factor in combo.factors.items()) + "$"
+    combo_str = combo_str.replace("+ -", "-")
+    labels_list.append(combo_str)
+
+fig, ax = plot_internal_diagram(
+    x,
+    moments_list,
+    labels=labels_list,
+    envelope=True,
+    figsize=(12, 6),
+    xlabel="Location [in]",
+    ylabel="Moment [kip-in]",
+    title="Moment Diagram",
+    save_png=f"images/{IDENTIFIER}_tb_1_moments",
+    show_plot=False,
+)
+
+M_dem_tuple_max = member.max_moment("Mz", ["strength"])
+M_dem_tuple_min = member.min_moment("Mz", ["strength"])
+
+critical_tuple = max(
+    [M_dem_tuple_max, M_dem_tuple_min],
+    key=lambda t: abs(t[0]),
+)
+
+M_dem = abs(critical_tuple[0]) * kip * inch
+governing_combo = critical_tuple[1]
+M_dem__kipft = M_dem * 1 * ft / 12 / inch
+
+# %% [markdown]
+"""
+![Moment Diagram](images/c_complex_2_span_tb_1_moments.png){#fig:moment_diagram_steel_1_span}
+
+Moment demands are:
+"""
+
+# %%
+# %%render
+M_dem
+M_dem__kipft
+
+# %% [markdown]
+"""
+We will check the maximum bending moment from strength-based load combinations against the strength-based moment capacity.
+"""
+# %%
+# %%render params
+phi_b = 0.9
+F_y = base_model.materials["steel"].fy * ksi
+Z_x = wf.Zx * inch**3
+
+# %%
+# %%render
+M_cap = phi_b * F_y * Z_x
+M_cap__kipft = M_cap * 1 * ft / (12 * inch)
+
+# %%
+# %%render
+DCR = M_dem / M_cap
+check_DCR = check_value(DCR, 1, "<=")
+
+# %% [markdown]
+"""
+We will also check deflection against a limit of $l/360$ as it is the governing case for this beam that supports both the floor and ceiling on level 2.
+"""
+
+# %%
+defl_list = []
+labels_list = []
+strength_combos = [combo for combo in tb_1_steel.load_combos.values() if "service" in combo.combo_tags]
+for combo in strength_combos:
+    x, defl = member.deflection_array("dy", 100, combo_name=combo.name)
+    defl_list += [defl]
+    combo_str = "$" + " + ".join(f"{factor}{load}" for load, factor in combo.factors.items()) + "$"
+    combo_str = combo_str.replace("+ -", "-")
+    labels_list.append(combo_str)
+
+fig, ax = plot_internal_diagram(
+    x,
+    defl_list,
+    labels=labels_list,
+    envelope=True,
+    figsize=(12, 6),
+    xlabel="Location [in]",
+    ylabel="Deflection [in]",
+    title="Deflection Diagram",
+    save_png=f"images/{IDENTIFIER}_deflections",
+    show_plot=False,
+)
+
+delta_tuple_max = member.max_deflection("dy", ["service"])
+delta_tuple_min = member.min_deflection("dy", ["service"])
+
+self_weight_max = member.max_deflection("dy", "D")
+self_weight_min = member.min_deflection("dy", "D")
+self_weight__defl = max(abs(self_weight_max), abs(self_weight_min))
+
+critical_tuple = max(
+    [delta_tuple_max, delta_tuple_min],
+    key=lambda t: abs(t[0]),
+)
+
+governing_combo = critical_tuple[1]
+
+# %% [markdown]
+"""
+![End beam deflection diagram](images/c_complex_2_span_deflections.png){#fig:end_beam_deflection_diagram}
+"""
+
+# %%
+delta_L_val = tb_1_steel.members["m1"].min_deflection("dy", "L")
+
+# %%
+# %%render long
+# fmt: off
+delta_L = (delta_L_val * inch * -1)
+delta_max__L = l_beam.to("inch") / 360
+check_delta__L = check_value(delta_L, delta_max__L)
+# fmt: on
+
+# %% [markdown]
+"""
+## Post Design
+
+### HSS Post
+"""
+
+# %%
+max_reaction = max(
+    [
+        abs(tb_1_steel.nodes[node].RxnFY[combo])
+        for node in tb_1_steel.nodes.keys()
+        for combo in tb_1_steel.load_combos.keys()
+    ]
+)
+
+# %% [markdown]
+"""
+The following \autoref{tab:hss_capacities} values are the reference design compression capacities of various HSS posts that could be used in this project.
+"""
+
+# %%
+# %%render
+h_level_1 = 13.5 * ft
+
+# %%
+hss_shape_list = [
+    "HSS3_1_2X3_1_2X1_8",
+    "HSS4X4X1_8",
+    "HSS4X4X3_16",
+    "HSS4X4X1_4",
+    "HSS4_1_2X4_1_2X1_4",
+    "HSS5X5X1_4",
+    "HSS5X5X5_16",
+    "HSS5X5X3_8",
+]
+capacities = pd.DataFrame({}, index=hss_shape_list)
+capacities.index.name = "Shape"
+K = 1.0
+L_c = float(h_level_1.to("inch") * K)
+L_c = 10.75 * 12
+E = 29000
+F_y = 50
+phi_c = 0.9
+for shape in hss_shape_list:
+    hss = aisc.HSS_shapes.sections[shape]
+    r = hss.rx
+    A = hss.area
+    F_cr = calculate_critical_stress(yield_stress=F_y, youngs_modulus=E, effective_length=L_c, radius_of_gyration=r)
+    capacities.loc[shape, "adjusted capacity"] = phi_c * F_cr * A
+    capacities.loc[shape, "radius of gyration"] = r
+    capacities.loc[shape, "gross area"] = A
+    capacities.loc[shape, "slenderness ratio"] = L_c / r
+    capacities.loc[shape, "critical buckling stress"] = F_cr
+
+column_name_map = {"adjusted capacity": r"$\phi_c P_n$ [kip]"}
+display_table(
+    dataframe=capacities,
+    column_names_filter_and_map=column_name_map,
+    position_float="centering",
+    caption="Common HSS shape capacities",
+    label="tab:hss_capacities",
+)
+
+# %%
+minimum_viable_shape = capacities.loc[capacities["adjusted capacity"] >= max_reaction, "adjusted capacity"].idxmin()
+minimum_viable_capacity = capacities.loc[capacities["adjusted capacity"] >= max_reaction, "adjusted capacity"].min()
+display_text(rf"The minimum viable HSS shape is {minimum_viable_shape}")
+display_math(
+    [
+        rf"P_u = {sig_figs(max_reaction, 3)} \text{{ kip}}",
+        rf"\phi_c P_n = {sig_figs(minimum_viable_capacity, 3)} \text{{ kip}}",
+    ]
+)
