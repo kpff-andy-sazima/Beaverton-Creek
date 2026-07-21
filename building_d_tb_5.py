@@ -14,7 +14,7 @@
 
 # %% [markdown]
 # ---
-# title: Building D D-6.3 + D-F.5 Transfer Beam, and Posts
+# title: Building D D-1 + D-C.5 Transfer Beam, and Posts
 # project: Beaverton Creak Apartments
 # location: Beaverton, OR
 # client: GBD Architects
@@ -64,7 +64,7 @@ handcalcs.set_option("latex_block_end", "\\end{equation*}")
 set_plot_style()
 
 # %%
-IDENTIFIER = "d6_6"
+IDENTIFIER = "dc_5"
 GENERATE_NEW_IMAGES = True
 
 # %% [markdown]
@@ -101,7 +101,7 @@ We will assume that the top flanges are fully braced by the floor (no LTB).
 
 We will first try to design this beam with a single span. If that does not work, we will use 2 spans with a post in the center wall. Dimensions of the problem are shown in \autoref{fig:a_tb_1}.
 
-![Tributary diagram of the beam in question](images/d_tb_6_6.png){width=50% #fig:a_tb_1}
+![Tributary diagram of the beam in question](images/d_tb_c_5.png){width=50% #fig:a_tb_1}
 
 We will assume that the top flanges are fully braced by the floor (no LTB).
 """
@@ -115,8 +115,8 @@ The beam loading and geometry are as follows
 
 # %%
 # %%render
-w_trib = (fi(11, 6) + fi(21, 4)) / 2 * ft
-l_trib = fi(18, 11) * ft
+w_trib = fi(30, 4) / 2 * ft
+l_trib = fi(30, 5) * ft
 n_levels_2 = 1
 n_levels_34 = 2
 n_levels = n_levels_2 + n_levels_34
@@ -201,6 +201,55 @@ D_point = 651 / 1000
 L_point = 1353 / 1000
 S_point = 320 / 1000
 
+# %% [markdown]
+"""
+There are flush beams that transfer loads on levels 2, 3, and 4 to HSS posts hidden in the bearing wall in the middle of this transfer beam. These loads must be considered as point loads.
+"""
+
+# %%
+l_fb1_1 = fi(5, 11) * ft
+l_fb1_2 = fi(2, 10) * ft
+A_fb1_1 = w_trib * l_fb1_1 / 2
+A_fb1_2 = w_trib * l_fb1_2 / 2
+
+# %%
+# %%render
+D_fb1_1 = D * A_fb1_1
+L_fb1_1 = L * A_fb1_1
+D_fb1_2 = D * A_fb1_2
+L_fb1_2 = L * A_fb1_2
+
+# %%
+D_fb1_1 = float(D_fb1_1.to("kip"))
+L_fb1_1 = float(L_fb1_1.to("kip"))
+D_fb1_2 = float(D_fb1_2.to("kip"))
+L_fb1_2 = float(L_fb1_2.to("kip"))
+
+# %% [markdown]
+"""
+This transfer beam also takes loads from a similarly, but not identically, loaded flush beam. This point load will be derived from point loads given by others for the outriggers that frame into it, then a simple analysis will obtain the point loads from the flush beam. Note that these J-7 outriggers only have uplift snow loading due to the roof trusses not framing into these outriggers, so only dead and live loads are analyzed.
+
+The worst-case downwards point loads given in calculations by others for the flush beam are as follows:
+"""
+
+# %%
+# %%render
+D_point__J7 = 17.8 * lb
+L_point__J7 = 60.3 * lb
+
+# %%
+# %%render
+s_outriggers = 8 / 12 * ft
+D_unif__FB = D_point__J7 / s_outriggers
+L_unif__FB = L_point__J7 / s_outriggers
+
+# %%
+# %%render
+l_fb = fi(16, 2) * ft
+D_point__FB = D_unif__FB * l_fb / 2
+L_point__FB = L_unif__FB * l_fb / 2
+D_point__FB = float(D_point__FB.to("kip"))
+L_point__FB = float(L_point__FB.to("kip"))
 
 # %%
 # Initialize FE Model
@@ -243,14 +292,29 @@ base_model.add_load_combo("all_nominal", {"D": 1, "L": 1, "L_r": 1, "S": 1, "W":
 tb_1_steel = deepcopy(base_model)
 
 joist_overhang_length = fi(6, 3, return_unit="in")
+fb_overhang_length = fi(8, 4, return_unit="in")
 
 # Nodes
-tb_1_steel.add_node("n1", 0, 0, 0)
-tb_1_steel.add_node("n2", float(l_trib.to("inch")), 0, 0)
-tb_1_steel.add_node("n3", float(l_trib.to("inch")) - joist_overhang_length, 0, 0)
+x0 = 0
+x_end = float(l_trib.to("inch"))
+x_post = fi(18, 2, return_unit="in")
+x_h_1 = fi(14, 8, return_unit="in")
+x_h_2 = float(l_trib.to("inch")) - fi(9, 8, return_unit="in")
+x_h_3 = float(l_trib.to("inch")) - fi(6, 0, return_unit="in")
+x_h_4 = float(l_trib.to("inch")) - fi(3, 0, return_unit="in")
+
+tb_1_steel.add_node("n1", x0, 0, 0)
+tb_1_steel.add_node("n2", x_end, 0, 0)
+tb_1_steel.add_node("n_fb", fb_overhang_length, 0, 0)
+tb_1_steel.add_node("n_j5", joist_overhang_length, 0, 0)
+tb_1_steel.add_node("n_post", x_post, 0, 0)
+tb_1_steel.add_node("n_header_1", x_h_1, 0, 0)
+tb_1_steel.add_node("n_header_2", x_h_2, 0, 0)
+tb_1_steel.add_node("n_header_3", x_h_3, 0, 0)
+tb_1_steel.add_node("n_header_4", x_h_4, 0, 0)
 
 # Wide flange shape
-wf = aisc.W_shapes.W16X31
+wf = aisc.W_shapes.W14X30
 display_text(f"Try a {wf.name}")
 
 # Add a section with the following properties:
@@ -268,30 +332,51 @@ tb_1_steel.add_member("m1", "n1", "n2", "steel", "wf")
 # Provide simple supports
 tb_1_steel.def_support("n1", True, True, True, False, False, False)
 tb_1_steel.def_support("n2", False, True, True, True, False, False)
+tb_1_steel.def_support("n_post", False, True, True, True, False, False)
 
 # Uniform loads
-x0 = 0
-x_j5 = float(l_trib.to("inch")) - joist_overhang_length
+# level 2 has joists framing to the transfer beam
+total_dead_load_2 = n_levels_2 * float(D_line) / 1000 / 12  # kip/in
+total_live_load_2 = n_levels_2 * float(L_line) / 1000 / 12  # kip/in
+tb_1_steel.add_member_dist_load(
+    "m1", "Fy", -total_dead_load_2, -total_dead_load_2, x1=joist_overhang_length, x2=x_end, case="D"
+)
+tb_1_steel.add_member_dist_load(
+    "m1", "Fy", -total_live_load_2, -total_live_load_2, x1=joist_overhang_length, x2=x_end, case="L"
+)
+# levels 3 and 4 has joists framing to the bearing walls and FB headers
+total_dead_load_34 = n_levels_34 * float(D_line) / 1000 / 12  # kip/in
+total_live_load_34 = n_levels_34 * float(L_line) / 1000 / 12  # kip/in
+tb_1_steel.add_member_dist_load("m1", "Fy", -total_dead_load_34, -total_dead_load_34, x1=x0, x2=x_h_1, case="D")
+tb_1_steel.add_member_dist_load("m1", "Fy", -total_dead_load_34, -total_dead_load_34, x1=x_h_2, x2=x_h_3, case="D")
+tb_1_steel.add_member_dist_load("m1", "Fy", -total_dead_load_34, -total_dead_load_34, x1=x_h_4, x2=x_end, case="D")
+tb_1_steel.add_member_dist_load("m1", "Fy", -total_live_load_34, -total_live_load_34, x1=x0, x2=x_h_1, case="L")
+tb_1_steel.add_member_dist_load("m1", "Fy", -total_live_load_34, -total_live_load_34, x1=x_h_2, x2=x_h_3, case="L")
+tb_1_steel.add_member_dist_load("m1", "Fy", -total_live_load_34, -total_live_load_34, x1=x_h_4, x2=x_end, case="L")
 
-total_dead_load_2 = (n_levels_2 * float(D_line)) / 1000 / 12  # kip/in
-total_dead_load_34 = (n_levels_34 * float(D_line)) / 1000 / 12  # kip/in
-tb_1_steel.add_member_dist_load("m1", "Fy", -total_dead_load_2, -total_dead_load_2, x1=x0, x2=x_j5, case="D")
-tb_1_steel.add_member_dist_load("m1", "Fy", -total_dead_load_34, -total_dead_load_34, case="D")
-
+# wall self weight
 wall_dead_load = n_levels * float(D_wall) / 1000 / 12  # kip/in
-tb_1_steel.add_member_dist_load("m1", "Fy", -wall_dead_load, -wall_dead_load, case="D")
+tb_1_steel.add_member_dist_load("m1", "Fy", -wall_dead_load, -wall_dead_load, x1=x0, x2=x_h_1, case="D")
+tb_1_steel.add_member_dist_load("m1", "Fy", -wall_dead_load, -wall_dead_load, x1=x_h_2, x2=x_h_3, case="D")
+tb_1_steel.add_member_dist_load("m1", "Fy", -wall_dead_load, -wall_dead_load, x1=x_h_4, x2=x_end, case="D")
 
 tb_1_steel.add_member_self_weight("FY", -1, case="D")
 
-total_live_load_2 = n_levels_2 * float(L_line) / 1000 / 12  # kip/in
-total_live_load_34 = n_levels_34 * float(L_line) / 1000 / 12  # kip/in
-tb_1_steel.add_member_dist_load("m1", "Fy", -total_live_load_2, -total_live_load_2, x1=x0, x2=x_j5, case="L")
-tb_1_steel.add_member_dist_load("m1", "Fy", -total_live_load_34, -total_live_load_34, case="L")
 
 # Point loads
-tb_1_steel.add_node_load("n3", "FY", -2 * D_point, "D")
-tb_1_steel.add_node_load("n3", "FY", -2 * L_point, "L")
-tb_1_steel.add_node_load("n3", "FY", -2 * S_point, "S")
+tb_1_steel.add_node_load("n_header_1", "FY", -n_levels_34 * D_fb1_1, "D")  # header loading
+tb_1_steel.add_node_load("n_header_1", "FY", -n_levels_34 * L_fb1_1, "L")  # header loading
+tb_1_steel.add_node_load("n_header_2", "FY", -n_levels_34 * D_fb1_1, "D")  # header loading
+tb_1_steel.add_node_load("n_header_2", "FY", -n_levels_34 * L_fb1_1, "L")  # header loading
+tb_1_steel.add_node_load("n_header_3", "FY", -n_levels_34 * D_fb1_1, "D")  # header loading
+tb_1_steel.add_node_load("n_header_3", "FY", -n_levels_34 * L_fb1_1, "L")  # header loading
+tb_1_steel.add_node_load("n_header_4", "FY", -n_levels_34 * D_fb1_1, "D")  # header loading
+tb_1_steel.add_node_load("n_header_4", "FY", -n_levels_34 * L_fb1_1, "L")  # header loading
+tb_1_steel.add_node_load("n_fb", "FY", -D_point__FB, "D")  # FB-1 loading from outriggers
+tb_1_steel.add_node_load("n_fb", "FY", -L_point__FB, "L")  # FB-1 loading from outriggers
+tb_1_steel.add_node_load("n_j5", "FY", -D_point, "D")
+tb_1_steel.add_node_load("n_j5", "FY", -L_point, "L")
+tb_1_steel.add_node_load("n_j5", "FY", -S_point, "S")
 
 # Analyze the beam
 tb_1_steel.analyze()
@@ -346,7 +431,7 @@ See the beam loading in \autoref{fig:tb_a_1_loading_1_span_14D} through \autoref
 
 - Note that all units are in kips and inches.
 
-![All nominal loads](images/d6_6_tb_1_steel_loading_1_span_all_nominal.png){width=100% #fig:tb_a_1_loading_1_span_14D}
+![All nominal loads](images/dc_5_tb_1_steel_loading_1_span_all_nominal.png){width=100% #fig:tb_a_1_loading_1_span_14D}
 """
 
 # %%
@@ -388,7 +473,7 @@ M_dem__kipft = M_dem * 1 * ft / 12 / inch
 
 # %% [markdown]
 """
-![Moment Diagram](images/d6_6_tb_1_moments.png){#fig:moment_diagram_steel_1_span}
+![Moment Diagram](images/dc_5_tb_1_moments.png){#fig:moment_diagram_steel_1_span}
 
 Moment demands are:
 """
@@ -463,7 +548,7 @@ governing_combo = critical_tuple[1]
 
 # %% [markdown]
 """
-![End beam deflection diagram](images/d6_6_deflections.png){#fig:end_beam_deflection_diagram}
+![End beam deflection diagram](images/dc_5_deflections.png){#fig:end_beam_deflection_diagram}
 """
 
 # %%
@@ -513,6 +598,7 @@ hss_shape_list = [
     "HSS5X5X1_4",
     "HSS5X5X5_16",
     "HSS5X5X3_8",
+    "HSS5X5X1_2",
 ]
 capacities = pd.DataFrame({}, index=hss_shape_list)
 capacities.index.name = "Shape"

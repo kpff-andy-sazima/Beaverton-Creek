@@ -225,6 +225,30 @@ L_fb1_1 = float(L_fb1_1.to("kip"))
 D_fb1_2 = float(D_fb1_2.to("kip"))
 L_fb1_2 = float(L_fb1_2.to("kip"))
 
+# %% [markdown]
+"""
+This transfer beam also takes loads from a similarly, but not identically, loaded flush beam. This point load will be derived from point loads given by others for the outriggers that frame into it, then a simple analysis will obtain the point loads from the flush beam. Note that these J-7 outriggers only have uplift snow loading due to the roof trusses not framing into these outriggers, so only dead and live loads are analyzed.
+
+The worst-case downwards point loads given in calculations by others for the flush beam are as follows:
+"""
+
+# %%
+# %%render
+D_point__J7 = 17.8 * lb
+L_point__J7 = 60.3 * lb
+
+# %%
+# %%render
+s_outriggers = 8 / 12 * ft
+D_unif__FB = D_point__J7 / s_outriggers
+L_unif__FB = L_point__J7 / s_outriggers
+
+# %%
+# %%render
+l_fb = fi(16, 2)
+D_point__FB = D_unif__FB * l_fb / 2
+L_point__FB = L_unif__FB * l_fb / 2
+
 # %%
 # Initialize FE Model
 base_model = FEModel3D()
@@ -326,6 +350,8 @@ tb_1_steel.add_member_dist_load("m1", "Fy", -total_live_load_34, -total_live_loa
 # Point loads
 tb_1_steel.add_node_load("n3", "FY", -2 * D_fb1_1, "D")  # 2 levels worth of FB-1 loading
 tb_1_steel.add_node_load("n3", "FY", -2 * L_fb1_1, "L")  # 2 levels worth of FB-1 loading
+tb_1_steel.add_node_load("n3", "FY", -D_point__FB, "D")  # FB-1 loading from outriggers
+tb_1_steel.add_node_load("n3", "FY", -L_point__FB, "L")  # FB-1 loading from outriggers
 tb_1_steel.add_node_load("n5", "FY", -2 * D_fb1_2, "D")  # 2 levels worth of FB-1 loading
 tb_1_steel.add_node_load("n5", "FY", -2 * L_fb1_2, "L")  # 2 levels worth of FB-1 loading
 tb_1_steel.add_node_load("n4", "FY", -D_point, "D")
