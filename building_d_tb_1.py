@@ -28,30 +28,52 @@
 
 # %%
 # %reset -f
+import os
 from copy import deepcopy
 from math import sqrt
 
 import forallpeople as units
 import handcalcs
+from IPython.display import Markdown, display
 
 try:
     import handcalcs.render
 except AttributeError:
     pass
 
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import numpy as np
 
 # import polars as pl
 import pandas as pd
+import structural_tools.model as model
 import sympy as sp
 from Pynite import FEModel3D
 from steelpy import aisc
+from structural_tools.model import (
+    LoadCase,
+    add_named_member_dist_load,
+    add_named_member_pt_load,
+    add_named_node_load,
+    add_named_self_weight,
+    create_base_model,
+    get_load_combos_from_tags,
+)
 from structural_tools.notebook.calculation import check_value, set_params_columns
 from structural_tools.notebook.calculation import feet_inches as fi
-from structural_tools.notebook.display import display_math, display_table, display_text, sig_figs
-from structural_tools.notebook.plotting import plot_internal_diagram, set_plot_style
-from structural_tools.steel import calculate_critical_stress
+from structural_tools.notebook.display import (
+    display_figure,
+    display_markdown,
+    display_math,
+    display_table,
+    display_text,
+    sig_figs,
+)
+from structural_tools.notebook.plotting import plot_internal_diagram, plot_member_loads, set_plot_style
+from structural_tools.notebook.runtime import image_path, runtime
+from structural_tools.steel import Section, calculate_critical_stress
 
 # %%
 units.environment(env_name="structural", top_level=True)
@@ -63,13 +85,20 @@ handcalcs.set_option("latex_block_start", "\\begin{equation*}")
 handcalcs.set_option("latex_block_end", "\\end{equation*}")
 set_plot_style()
 
-# %%
-IDENTIFIER = "d7_3"
-GENERATE_NEW_IMAGES = False
+#######################################################################################################################
+############################################## USER INPUT #############################################################
+BEAM_SELECTION = "W21X48"
+#######################################################################################################################
+#######################################################################################################################
+
+IDENTIFIER = runtime.identifier
+PATH = runtime.path
+MEMBER_NAME = "m_1"
+
 
 # %% [markdown]
 """
-# Flush beam and post analysis
+# Beam and post analysis
 
 ## Loading
 
@@ -99,34 +128,14 @@ L_red__limit = 0.4 * LL
 """
 We will assume that the top flanges are fully braced by the floor (no LTB).
 
-We will first try to design this beam with a single span. If that does not work, we will use 2 spans with a post in the center wall. Dimensions of the problem are shown in \autoref{fig:a_tb_1}.
-
-![Tributary diagram of the beam in question](images/d_tb_7_3.png){width=50% #fig:a_tb_1}
+We will first try to design this beam with a single span. If that does not work, we will use 2 spans with a post in the center wall. Dimensions of the problem are shown in \autoref{fig:tributary_diagram}.
 """
 
 # %%
-set_params_columns(6)
+display_figure(
+    runtime.image_path("tributary_diagram"), "Tributary diagram of the beam", "fig:tributary_diagram", width="70%"
+)
 
-# %%
-# %%render params
-DL = 28.5 * psf
-LL = 40 * psf
-
-# %% [markdown]
-"""
-Since we are designing interior beams, live load reduction according to ASCE 7 Section 4.7 will apply. Each beam will have a different reduction factor, but the following applies:
-
-1. Interior beam $\rightarrow K_{LL} = 2$ (ASCE 7 Table 4.7-1)
-2. The transfer beams all support at least 2 floors $\rightarrow L_{red} \geq 0.4 L_o = L_{red,limit}$ (ASCE 7 Sec. 4.7.2)
-"""
-# %%
-K_LL = 2
-L_red__limit = 0.4 * LL
-
-# %% [markdown]
-"""
-We will assume that the top flanges are fully braced by the floor (no LTB).
-"""
 
 # %% [markdown]
 """
@@ -138,7 +147,7 @@ The beam loading and geometry are as follows
 # %%
 # %%render
 w_trib = (fi(21, 4) + fi(9, 8)) / 2 * ft
-l_trib = fi(30, 2) * ft
+l_trib = fi(29, 2) * ft
 n_levels_2 = 1
 n_levels_34 = 2
 n_levels = n_levels_2 + n_levels_34
@@ -149,7 +158,7 @@ A_trib = w_trib * l_trib * n_levels
 
 # %% [markdown]
 """
-# We can check if the live load can be reduced.
+We can check if the live load can be reduced.
 """
 
 # %%
@@ -168,18 +177,9 @@ else: L_red = L_red__limit
 
 # %% [markdown]
 """
-The governing load combinations will be:
+### Load Cases
 
-Strength
-
-1. $1.4 D$
-2. $1.2 D + 1.6 L$
-
-Service
-
-1. $L$
-
-This means the load cases are:
+The basic uniform load cases are:
 """
 
 # %%
@@ -222,245 +222,145 @@ L_point = 2 * 1353 / 1000
 S_point = 2 * 320 / 1000
 
 # %%
-# Initialize FE Model
-base_model = FEModel3D()
-
-# Materials
-E = 29000  # Modulus of elasticity (ksi)
-Fy = 50  # Yield stress (ksi)
-nu = 0.3  # Poisson's ratio
-G = E / (2 * (1 + nu))  # Shear modulus of elasticity (ksi)
-rho = 489 / (12**3) / 1000  # Density (kci)
-steel = base_model.add_material(name="steel", E=E, G=G, nu=nu, rho=rho, fy=Fy)
-
-# Load combinations
-base_model.add_load_combo("1a", {"D": 1.4}, ["strength"])
-base_model.add_load_combo("2a-1", {"D": 1.2, "L": 1.6, "L_r": 0.5}, ["strength"])
-base_model.add_load_combo("2a-2", {"D": 1.2, "L": 1.6, "S": 0.3}, ["strength"])
-base_model.add_load_combo("3a-1", {"D": 1.2, "L_r": 1.6, "L": 1.0}, ["strength"])
-base_model.add_load_combo("3a-2", {"D": 1.2, "S": 1.0, "L": 1.0}, ["strength"])
-base_model.add_load_combo("3a-3", {"D": 1.2, "L_r": 1.6, "W": 0.5}, ["strength"])
-base_model.add_load_combo("3a-4", {"D": 1.2, "S": 1.0, "W": 0.5}, ["strength"])
-# base_model.add_load_combo("4a-1", {"D": 1.2, "W": 1.0, "L": 1.0, "L_r": 0.5}, ["strength"])
-# base_model.add_load_combo("4a-2", {"D": 1.2, "W": 1.0, "L": 1.0, "S": 0.3}, ["strength"])
-# base_model.add_load_combo("5a", {"D": 0.9, "W": -1.0}, ["strength"])
-# base_model.add_load_combo("6", {"D": 1.2, "E_v": 1.0, "E_h": 1.0, "L": 1.0, "S": 0.15}, ["strength"])
-# base_model.add_load_combo("7", {"D": 0.9, "E_v": -1.0, "E_h": 1.0}, ["strength"])
-base_model.add_load_combo("L", {"L": 1}, ["service"])
-base_model.add_load_combo("L_r", {"L_r": 1}, ["service"])
-base_model.add_load_combo("S", {"S": 1}, ["service"])
-# base_model.add_load_combo("W", {"W": 1}, ["service"])
-# base_model.add_load_combo("0.5D+L", {"D": 0.5, "L": 1}, ["service OSSC25 wood"])
-# base_model.add_load_combo("CC.2-1a", {"D": 1, "L": 1}, ["service ASCE7-22"])
-# base_model.add_load_combo("CC.2-1b", {"D": 1, "S_ser": 1}, ["service ASCE7-22"])
-# base_model.add_load_combo("CC.2-2", {"D": 1, "L": 0.5}, ["creep ASCE7-22"])
-base_model.add_load_combo("D", {"D": 1}, ["self weight"])
-base_model.add_load_combo("all_nominal", {"D": 1, "L": 1, "L_r": 1, "S": 1, "W": 1}, ["all_nominal"])
-
-
-# %%
-tb_1_steel = deepcopy(base_model)
+beam = create_base_model(
+    include_ossc_creep_combos=False,
+    load_cases=[LoadCase.DEAD, LoadCase.LIVE, LoadCase.SNOW],
+)
 
 joist_overhang_length = fi(7, 3, return_unit="in")
-floor_overhang_length = fi(1, 0, return_unit="in")
 
 # Nodes
-tb_1_steel.add_node("n1", 0, 0, 0)
-tb_1_steel.add_node("n2", float(l_trib.to("inch")), 0, 0)
-tb_1_steel.add_node("n3", float(l_trib.to("inch")) - joist_overhang_length, 0, 0)
-tb_1_steel.add_node("n4", float(l_trib.to("inch")) - floor_overhang_length, 0, 0)
+beam.add_node("n_start", 0, 0, 0)
+beam.add_node("n_end", float(l_trib.to("inch")), 0, 0)
+beam.add_node("n_joist", float(l_trib.to("inch")) - joist_overhang_length, 0, 0)
 
 # Wide flange shape
-wf = aisc.W_shapes.W21X48
-display_text(f"Try a {wf.name}")
+section = Section.from_shape(BEAM_SELECTION)
+display_text(f"Try a {section.name}")
 
 # Add a section with the following properties:
-tb_1_steel.add_section(
+beam.add_section(
     "wf",
-    A=wf.area,
-    Iy=wf.Iy,
-    Iz=wf.Ix,
-    J=wf.J,
+    A=section.area,
+    Iy=section.second_moment_of_area_y_axis,
+    Iz=section.second_moment_of_area_x_axis,
+    J=section.torsional_constant,
 )
 
 # Add a member
-tb_1_steel.add_member("m1", "n1", "n2", "steel", "wf")
+beam.add_member(MEMBER_NAME, "n_start", "n_end", "steel 50ksi", "wf")
 
 # Provide simple supports
-tb_1_steel.def_support("n1", True, True, True, False, False, False)
-tb_1_steel.def_support("n4", False, True, True, True, False, False)
+beam.def_support("n_start", True, True, True, False, False, False)
+beam.def_support("n_end", False, True, True, True, False, False)
 
 # Uniform loads
 x0 = 0
 x1 = float(l_trib.to("inch")) - joist_overhang_length
 
+# Dead
 total_dead_load_2 = (n_levels_2 * float(D_line)) / 1000 / 12  # kip/in
 total_dead_load_34 = (n_levels_34 * float(D_line)) / 1000 / 12  # kip/in
-tb_1_steel.add_member_dist_load("m1", "Fy", -total_dead_load_2, -total_dead_load_2, x1=x0, x2=x1, case="D")
-tb_1_steel.add_member_dist_load("m1", "Fy", -total_dead_load_34, -total_dead_load_34, case="D")
-
-wall_dead_load = n_levels * float(D_wall) / 1000 / 12  # kip/in
-tb_1_steel.add_member_dist_load(
-    "m1",
-    "Fy",
-    -wall_dead_load,
-    -wall_dead_load,
-    case="D",
+add_named_member_dist_load(
+    beam, MEMBER_NAME, "Fy", -total_dead_load_2, -total_dead_load_2, x1=x0, x2=x1, case="D", name="Dead level 2"
 )
-
-tb_1_steel.add_member_self_weight("FY", -1, case="D")
-
+add_named_member_dist_load(
+    beam, MEMBER_NAME, "Fy", -total_dead_load_34, -total_dead_load_34, case="D", name="Dead level 3+"
+)
+# Wall weight
+wall_dead_load = n_levels * float(D_wall) / 1000 / 12  # kip/in
+add_named_member_dist_load(beam, MEMBER_NAME, "Fy", -wall_dead_load, -wall_dead_load, case="D", name="Interior walls")
+# Live
 total_live_load_2 = n_levels_2 * float(L_line) / 1000 / 12  # kip/in
 total_live_load_34 = n_levels_34 * float(L_line) / 1000 / 12  # kip/in
-tb_1_steel.add_member_dist_load("m1", "Fy", -total_live_load_2, -total_live_load_2, x1=x0, x2=x1, case="L")
-tb_1_steel.add_member_dist_load("m1", "Fy", -total_live_load_34, -total_live_load_34, case="L")
+add_named_member_dist_load(
+    beam, MEMBER_NAME, "Fy", -total_live_load_2, -total_live_load_2, x1=x0, x2=x1, case="L", name="Live level 2"
+)
+add_named_member_dist_load(
+    beam, MEMBER_NAME, "Fy", -total_live_load_34, -total_live_load_34, case="L", name="Live level 3+"
+)
+# Self weight
+add_named_self_weight(beam, "FY", -1, case="D")
 
 # Point loads
-tb_1_steel.add_node_load("n3", "FY", -D_point, "D")
-tb_1_steel.add_node_load("n3", "FY", -L_point, "L")
-tb_1_steel.add_node_load("n3", "FY", -S_point, "S")
+add_named_node_load(beam, "n_joist", "FY", -D_point, case="D", name="J5 Dead")
+add_named_node_load(beam, "n_joist", "FY", -L_point, case="L", name="J5 Live")
+add_named_node_load(beam, "n_joist", "FY", -S_point, case="S", name="J5 Snow")
 
 # Analyze the beam
-tb_1_steel.analyze()
-
-# %%
-if GENERATE_NEW_IMAGES:
-    # from Pynite.Rendering import Renderer  # or Pynite.Visualization
-    import vtk
-    from Pynite.Visualization import Renderer  # or Pynite.Visualization
-
-    # Create renderer
-    renderer = Renderer(tb_1_steel)
-
-    combo_name = "all_nominal"
-    renderer.combo_name = combo_name
-    renderer.window.SetSize(1920, 540)
-
-    renderer.theme = "print"
-    renderer.annotation_size = 3
-    renderer.update()
-    renderer.renderer.ResetCamera()
-    camera = renderer.renderer.GetActiveCamera()
-    camera.Zoom(3.25)
-    actors = renderer.renderer.GetActors()
-    actors.InitTraversal()
-    for i in range(0, actors.GetNumberOfItems()):
-        actor = actors.GetNextActor()
-        if i >= 4:
-            if actor.GetClassName() == "vtkFollower":
-                actor.GetProperty().SetColor(0, 0.75, 0)  # red labels
-    renderer.window.Render()
-
-    w2if = vtk.vtkWindowToImageFilter()
-    w2if.SetInput(renderer.window)
-    w2if.SetInputBufferTypeToRGB()
-    w2if.ReadFrontBufferOff()
-
-    writer = vtk.vtkPNGWriter()
-    writer.SetInputConnection(w2if.GetOutputPort())
-    writer.SetFileName(f"images/{IDENTIFIER}_tb_1_steel_loading_1_span_{combo_name}.png")
-    writer.Write()
-
-    # Now that we're done with the render window, finalize it
-    renderer.window.Finalize()
-
-    # Save result
-    # renderer.screenshot("images/tb_1_steel_loading.png", interact=False, reset_camera=False)
+beam.analyze()
 
 # %% [markdown]
 """
-See the beam loading in \autoref{fig:tb_a_1_loading_1_span_14D} through \autoref{fig:tb_a_1_loading_1_span_L}.
-
-- Note that all units are in kips and inches.
-
-![All nominal loads](images/d7_3_tb_1_steel_loading_1_span_all_nominal.png){width=100% #fig:tb_a_1_loading_1_span_14D}
+The beam loading is shown in \autoref{fig:nominal_loads}.
 """
 
 # %%
-member = tb_1_steel.members["m1"]
-moments_list = []
-labels_list = []
-strength_combos = [combo for combo in tb_1_steel.load_combos.values() if "strength" in combo.combo_tags]
-for combo in strength_combos:
-    x, M = member.moment_array("Mz", 100, combo_name=combo.name)
-    moments_list += [M]
-    combo_str = "$" + " + ".join(f"{factor}{load}" for load, factor in combo.factors.items()) + "$"
-    combo_str = combo_str.replace("+ -", "-")
-    labels_list.append(combo_str)
+fig, ax = plot_member_loads(beam.members[MEMBER_NAME], save_png=image_path("nominal_loads"))
 
+display_figure(
+    image_path=image_path("nominal_loads"), caption="All nominal loads", label="fig:nominal_loads", width="100%"
+)
+
+# %% [markdown]
+"""
+We will check the moment capacity for each load combination. This could be plastic deformation, inelastic lateral torsional buckling, or elastic lateral torsional buckling.
+
+First, we need to find the moments in the beam (see \autoref{fig:moments}).
+"""
+
+# %%
+x, moments, labels, _ = model.get_moments_from_tags(model=beam)
 fig, ax = plot_internal_diagram(
     x,
-    moments_list,
-    labels=labels_list,
+    moments,
+    labels=labels,
     envelope=True,
     figsize=(12, 6),
     xlabel="Location [in]",
     ylabel="Moment [kip-in]",
     title="Moment Diagram",
-    save_png=f"images/{IDENTIFIER}_tb_1_moments",
+    save_png=image_path("moments"),
     show_plot=False,
 )
 
-M_dem_tuple_max = member.max_moment("Mz", ["strength"])
-M_dem_tuple_min = member.min_moment("Mz", ["strength"])
+display_figure(image_path=image_path("moments"), caption="Moment diagram", label="fig:moments", width="100%")
 
-critical_tuple = max(
-    [M_dem_tuple_max, M_dem_tuple_min],
-    key=lambda t: abs(t[0]),
+# %% [markdown]
+"""
+Then, we follow the procedure in AISC 360 Section F2 for wide flange shapes. The summary of this analysis is shown in \autoref{tab:flexure_results}
+"""
+
+# %%
+flexure_results = model.analyze_member_flexure(beam, section)
+
+column_name_map = {
+    "flange": "Flange",
+    "segment start": r"$x_{start}$",
+    "segment end": r"$x_{end}$",
+    "unbraced length": r"$L_b$",
+    "ltb modification factor": r"$C_b$",
+    "moment demand": r"$M_u$",
+    "factored moment capacity": r"$\phi M_n$",
+    "limit region": "Regime",
+    "DCR": "DCR",
+}
+display_table(
+    flexure_results,
+    column_names_filter_and_map=column_name_map,
+    caption="Beam flexure analysis",
+    label="tab:flexure_results",
 )
-
-M_dem = abs(critical_tuple[0]) * kip * inch
-governing_combo = critical_tuple[1]
-M_dem__kipft = M_dem * 1 * ft / 12 / inch
-
-# %% [markdown]
-"""
-![Moment Diagram](images/d7_3_tb_1_moments.png){#fig:moment_diagram_steel_1_span}
-
-Moment demands are:
-"""
-
-# %%
-# %%render
-M_dem
-M_dem__kipft
-
-# %% [markdown]
-"""
-We will check the maximum bending moment from strength-based load combinations against the strength-based moment capacity.
-"""
-# %%
-# %%render params
-phi_b = 0.9
-F_y = base_model.materials["steel"].fy * ksi
-Z_x = wf.Zx * inch**3
-
-# %%
-# %%render
-M_cap = phi_b * F_y * Z_x
-M_cap__kipft = M_cap * 1 * ft / (12 * inch)
-
-# %%
-# %%render
-DCR = M_dem / M_cap
-check_DCR = check_value(DCR, 1, "<=")
 
 # %% [markdown]
 """
 We will also check deflection against a limit of $l/360$ as it is the governing case for this beam that supports both the floor and ceiling on level 2.
+
+The deflection diagram is shown in \autoref{fig:deflections}
 """
 
 # %%
-defl_list = []
-labels_list = []
-strength_combos = [combo for combo in tb_1_steel.load_combos.values() if "service" in combo.combo_tags]
-for combo in strength_combos:
-    x, defl = member.deflection_array("dy", 100, combo_name=combo.name)
-    defl_list += [defl]
-    combo_str = "$" + " + ".join(f"{factor}{load}" for load, factor in combo.factors.items()) + "$"
-    combo_str = combo_str.replace("+ -", "-")
-    labels_list.append(combo_str)
-
+x, defl_list, labels_list, _ = model.get_deflections_from_tags(model=beam)
 fig, ax = plot_internal_diagram(
     x,
     defl_list,
@@ -470,10 +370,16 @@ fig, ax = plot_internal_diagram(
     xlabel="Location [in]",
     ylabel="Deflection [in]",
     title="Deflection Diagram",
-    save_png=f"images/{IDENTIFIER}_deflections",
+    save_png=image_path("deflections"),
     show_plot=False,
 )
 
+display_figure(
+    image_path=image_path("deflections"), caption="Deflection diagram", label="fig:deflections", width="100%"
+)
+
+
+member = beam.members[MEMBER_NAME]
 delta_tuple_max = member.max_deflection("dy", ["service"])
 delta_tuple_min = member.min_deflection("dy", ["service"])
 
@@ -488,20 +394,24 @@ critical_tuple = max(
 
 governing_combo = critical_tuple[1]
 
+# %%
+delta_L_val = beam.members[MEMBER_NAME].min_deflection("dy", "L OSSC25")
+delta_S_val = beam.members[MEMBER_NAME].min_deflection("dy", "S OSSC25")
+
 # %% [markdown]
 """
-![End beam deflection diagram](images/d7_3_deflections.png){#fig:end_beam_deflection_diagram}
+The deflection checks are shown below.
 """
-
-# %%
-delta_L_val = tb_1_steel.members["m1"].min_deflection("dy", "L")
 
 # %%
 # %%render long
 # fmt: off
 delta_L = (delta_L_val * inch * -1)
+delta_S = (delta_S_val * inch * -1)
 delta_max__L = l_trib.to("inch") / 360
+delta_max__S = l_trib.to("inch") / 360
 check_delta__L = check_value(delta_L, delta_max__L)
+check_delta__S = check_value(delta_S, delta_max__S)
 # fmt: on
 
 # %% [markdown]
@@ -509,14 +419,17 @@ check_delta__L = check_value(delta_L, delta_max__L)
 ## Post Design
 
 ### HSS Post
+
+We will look at the worst-case post reaction for the beam.
 """
 
 # %%
 max_reaction = max(
+    [abs(beam.nodes[node].RxnFY[combo]) for node in beam.nodes.keys() for combo in beam.load_combos.keys()]
+)
+display_math(
     [
-        abs(tb_1_steel.nodes[node].RxnFY[combo])
-        for node in tb_1_steel.nodes.keys()
-        for combo in tb_1_steel.load_combos.keys()
+        rf"P_u = {sig_figs(max_reaction, 3)} \text{{ kip}}",
     ]
 )
 
@@ -574,7 +487,10 @@ minimum_viable_capacity = capacities.loc[capacities["adjusted capacity"] >= max_
 display_text(rf"The minimum viable HSS shape is {minimum_viable_shape}")
 display_math(
     [
-        rf"P_u = {sig_figs(max_reaction, 3)} \text{{ kip}}",
         rf"\phi_c P_n = {sig_figs(minimum_viable_capacity, 3)} \text{{ kip}}",
     ]
 )
+
+# %%
+# %%render long
+check_post = check_value(minimum_viable_capacity, max_reaction)
