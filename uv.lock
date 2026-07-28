@@ -3045,6 +3045,7 @@ dependencies = [
     { name = "pandas" },
     { name = "pyyaml" },
     { name = "ruff" },
+    { name = "steelpy" },
 ]
 
 [package.metadata]
@@ -3059,6 +3060,7 @@ requires-dist = [
     { name = "pandas" },
     { name = "pyyaml" },
     { name = "ruff" },
+    { name = "steelpy" },
 ]
 
 [[package]]
