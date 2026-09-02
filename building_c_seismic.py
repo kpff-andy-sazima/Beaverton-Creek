@@ -31,6 +31,8 @@ try:
     import handcalcs.render  # type: ignore[import-not-found]  # noqa: F401
 except AttributeError:
     pass
+import warnings
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -49,13 +51,15 @@ from structural_tools.notebook import (
     sig_figs,
 )
 from structural_tools.notebook.calculation import feet_inches as fi
-from structural_tools.notebook.runtime import image_path
+from structural_tools.notebook.runtime import image_path, runtime
 from structural_tools.structure import LateralSystem, Level, Structure
 from structural_tools.wood.shear_walls import (
     assign_force_schedule,
     assign_values_for_all_levels_per_wall,
     assign_values_for_all_walls_per_level,
+    calculate_deflections,
     calculate_end_post_forces,
+    calculate_required_strap_capacity_interior_walls,
     check_shear_wall_tributary_area,
     create_shear_walls_dataframe_from_dict,
     design_shear_walls_envelope,
@@ -72,6 +76,10 @@ from structural_tools.wood.sheathing import (
 if TYPE_CHECKING:
     from structural_tools.units import ft, inch, ksf, lb, psi
 
+warnings.filterwarnings(
+    "ignore",
+    category=pd.errors.PerformanceWarning,
+)
 initialize_notebook()
 
 # %% [markdown]
@@ -307,6 +315,9 @@ h_n__check = check_value(h_n, 65 * ft, "<=")
 h_n = float(h_n)
 
 # %%
+X_plan = fi(221, 6)  # ft
+Y_plan = fi(115, 6)  # ft
+plan_dimensions = (X_plan, Y_plan)
 structure = Structure(
     lateral_system_x=LateralSystem(system_index="A16"),
     lateral_system_y=LateralSystem(system_index="A16"),
@@ -319,6 +330,7 @@ structure = Structure(
         6: Level(height=0, weight=W_level__roof),  # roof level height not considered
     },
     structural_height=h_n,
+    plan_dimensions=plan_dimensions,
 )
 
 # %%
@@ -390,7 +402,6 @@ C_s__x = seismic_loads.c_s_x
 C_s__y = seismic_loads.c_s_y
 V_x = seismic_loads.v_x
 V_y = seismic_loads.v_y
-print(C_s__x, C_s__y, V_x, V_y)
 
 # %% [markdown]
 r"""
@@ -406,7 +417,6 @@ Calculating for each floor leads to the following \autoref{tab:seismic_forces_ca
 # Reverse the order of the dataframe with '.loc[::-1]' so roof is the top row and ground is the bottom row, then apply formatting with the 'format_dataframe' function
 column_name_map = seismic_loads.column_name_map
 del column_name_map["unbounded diaphragm design force"]
-del column_name_map["minimum diaphragm design force"]
 del column_name_map["maximum diaphragm design force"]
 del column_name_map["diaphragm design force"]
 display_table(
@@ -903,11 +913,8 @@ shear_walls["level seismic force per area"] = shear_walls["level seismic force"]
 E_endpost = 1_600_000
 A_endpost = 2 * 5.25
 Delta_A = 0.25
-X_plan = fi(221, 6)  # ft
-Y_plan = fi(115, 6)  # ft
 CM_x = fi(102)  # ft
 CM_y = fi(43, 3)  # ft
-plan_dimensions = (X_plan, Y_plan)
 center_of_mass = (CM_x, CM_y)
 shear_walls = design_shear_walls_envelope(
     shear_walls,
@@ -917,304 +924,10 @@ shear_walls = design_shear_walls_envelope(
     Delta_A=Delta_A,
     center_of_mass=center_of_mass,
     plan_dimensions=plan_dimensions,
+    c_d_x=C_d__x,
+    c_d_y=C_d__y,
+    i_e=I_e,
 )
-shear_walls.to_csv("shear_walls_C_new.csv")
-
-# %%
-# Rename columns for display with LaTeX formatting for units and subscripts/superscripts
-column_name_map = {
-    "tributary weight": "$w_{trib}$ [psf]",
-    "tributary area": "$A$ [ft$^2$]",
-    "shear demand": "$F_x$ [lbf]",
-    "cumulative shear demand": "$F_{x,cum}$ [lbf]",
-    "wall length": "$l_{wall}$ [ft]",
-    "unit shear demand": "$v$ [plf]",
-    "adjusted unit shear demand": "$0.7 v$ [lbf]",
-    "adjusted unit shear capacity": "$v_{cap}$ [plf]",
-    "sheathed sides": "sides",
-    "nail spacing": "$s_{nail}$ [in]",
-}
-
-# %% [markdown]
-# #### East-West Direction
-
-# %% [markdown]
-# Shear wall shear forces are tabulated in \autoref{tab:shear_wall_forces_roof_ew} through \autoref{tab:shear_wall_forces_level2_ew}.
-
-# Fix trib area of certain walls on all levels
-
-# %%
-# Location of wall lines of rigidity
-
-# %%
-# Rename columns for display with LaTeX formatting for units and subscripts/superscripts
-column_name_map = {
-    "tributary weight": "$W_{trib}$ [psf]",
-    "tributary area": "$A$ [ft$^2$]",
-    "shear demand": "$F_x$ [lbf]",
-    "cumulative shear demand": "$F_{x,cum}$ [lbf]",
-    "wall length": "$l_{wall}$ [ft]",
-    "unit shear demand": "$v$ [plf]",
-    "adjusted unit shear demand": "$0.7 v$ [plf]",
-    "adjusted unit shear capacity": "$v_{cap}$ [plf]",
-    "sheathed sides": "sides",
-    "nail spacing": "$s_{nail}$ [in]",
-}
-
-# %% [markdown]
-# ### Rigid Diaphragm Assumption
-
-# %% [markdown]
-# With a rigid diaphragm assumption, we now must calculate the following in each direction:
-#
-# 1. The relative stiffnesses of the shear walls to obtain a center of rigidity.
-# 2. The center of mass of the diaphragm with the center of rigidity to obtain an eccentricity.
-#
-# The relative stiffnesses of the shear walls can be calculated by using the deflection equation from NDS SDPWS Sec. 4.3.4
-#
-# \begin{align*}
-# k &= \frac{F}{\delta},\, \text{assume }F = \text{induced load demand in the shear wall} \\
-# \delta_{sw} &= \frac{8vh^3}{EAb} + \frac{vh}{1000 G_a} + \frac{h \Delta_A}{b}\quad \text{(SDPWS Eq. 4.3-1)}
-# \end{align*}
-#
-# where
-#
-# - $b =$ the shear wall length [ft]
-# - $\Delta_A =$ vertical deformation of the wall overturning anchorage system + vertical compression deformation [in]
-# - $E =$ modulus of elasticity of end posts [psi]
-# - $A =$ area of end post cross-section [in$^2$]
-# - $G_a =$ apparent shear wall shear stiffness from nail slip and panel shear deformation [kip/in]
-# - $h =$ shear wall height [ft]
-# - $v =$ unit shear force induced by the design load [plf]
-# - $\delta_{sw} =$ maximum shear wall deflection determined by elastic analysis [in]
-#
-# Note that for the following calculations, we will conservatively use the unit shear force induced by the nominal load, not the design load, for the value of $v$. This is because the stiffnesses obtained from this use will allow us to use the stiffnesses for deflection limits and story drift calculations
-#
-# We will assume that the end posts are (2) 2x4 Douglas Fir No. 2; this means:
-
-# %%
-# %%render
-E_endpost = 1_600_000 * psi
-A_endpost = 2 * 5.25 * inch**2
-
-# %% [markdown]
-# We will assume a continuous tiedown rod system. A conservative first-pass value for $\Delta_A$ can be:
-
-# %%
-# %%render params
-Delta_A = 0.25 * inch
-
-# %% [markdown]
-# #### Shear Wall Rigidities
-#
-# With the deflections of each shear wall, along with the force demand of each shear wall, we can obtain the stiffnesses (and therefore, relative stiffnesses) of all the walls.
-#
-# Each relative stiffness is relative to the level. The sum of all relative stiffnesses on each level is $1.0$.
-#
-# \begin{align*}
-# k &= \frac{F_x}{\delta_{sw}} \\
-# R &= \frac{k_{wall}}{\sum {k_{wall}}}
-# \end{align*}
-
-# %% [markdown]
-# ##### North-South Direction
-
-# %% [markdown]
-# Rigidities in the N-S direction can be found in \autoref{tab:wall_rigidities_ns_level5} through \autoref{tab:wall_rigidities_ns_level2}.
-
-# %%
-column_name_map = {
-    "cumulative shear demand": "$F_x$ [lbf]",
-    "delta_sw": r"$\delta_{sw}$ [in]",
-    "wall stiffness": "$k$ [lbf/in]",
-    "relative wall stiffness": "$R$ [-]",
-}
-
-# %% [markdown]
-# ##### East-West Direction
-
-# %% [markdown]
-# Rigidities in the E-W direction can be found in \autoref{tab:wall_rigidities_ew_level5}, \autoref{tab:wall_rigidities_ew_level4}, \autoref{tab:wall_rigidities_ew_level3}, \autoref{tab:wall_rigidities_ew_level2},
-
-# %%
-column_name_map = {
-    "cumulative shear demand": "$F_x$ [lbf]",
-    "delta_sw": r"$\delta_{sw}$ [in]",
-    "wall stiffness": "$k$ [lbf/in]",
-    "relative wall stiffness": "$R$ [-]",
-}
-
-# %% [markdown]
-# #### Center of Rigidity and Center of Mass
-#
-# We can find the center of rigidity by taking the weighted sum of all wall stiffnesses and their locations relative to a datum. In this case, we will use the north-west-most corner of the building (i.e., the intersection of lines B-1 and B-A).
-#
-# $$
-# \bar{x}_r = \frac{\sum k_{ns} x}{\sum k_{ns}},\, \bar{y}_r = \frac{\sum k_{ew} y}{\sum k_{ew}}
-# $$
-#
-# Note: each wall is assumed to have zero rigidity in the direction perpendicular to them.
-#
-# The top floor has a higher concentration of load on the N-E corner, but this area is relatively small and is only present on the top floor. We will assume the center of mass is the same as for a uniform floor weight.
-#
-# All dimensions are measured from an origin at the S-E corner of the building (i.e., the intersection of C-9 and C-Z).
-
-# %%
-# %%render params
-X_plan = fi(221, 6)  # ft
-Y_plan = fi(115, 6)  # ft
-CM_x = fi(102)  # ft
-CM_y = fi(43, 3)  # ft
-
-# %% [markdown]
-# An accidental torsion eccentricity of 5% must be added/subtracted.
-
-# %%
-# %%render
-CM_x__a__plus = CM_x + X_plan * 0.05
-CM_x__a__minus = CM_x - X_plan * 0.05
-CM_y__a__plus = CM_y + Y_plan * 0.05
-CM_y__a__minus = CM_y - Y_plan * 0.05
-
-# %% [markdown]
-# The eccentricity used is determined by the location of the wall in relation to the center of rigidity. Since the wall rotates about the center of rigidity, we want to position the center of mass to ensure each wall is getting the maximum possible force to be conservative. If the center of mass is positioned on the opposite side of the center of rigidity relative to the wall in question, that mass will _decrease_ the shear experienced by that wall.
-#
-# This means we always want the center of mass to be on the same side of the center of rigidity as the wall. The eccentricities shown in the following tables are based on the worst-case scenario. This is not immediately obvious due to all torques being given a positive value.
-#
-# How the center of rigidity, center of mass, and eccentricity interact are illustrated in \autoref{fig:rigid_diaphragm_moments}. The moments generated by the rotation of the center of mass around the center of rigidity differ based on the chosen eccentricity.
-#
-# ![Moments applied by a rigid diaphragm](images/rigid_diaphragm_moments.png){width=50% #fig:rigid_diaphragm_moments}
-#
-# $$
-# d_x = \left| x - \text{CR}_x \right|\text{ and }\, d_y = \left| y - \text{CR}_y \right|
-# $$
-
-# %% [markdown]
-# The centers of rigidity for each floor are given in \autoref{tab:center_of_rigidity_level5} through \autoref{tab:center_of_rigidity_level2}.
-
-# %%
-column_name_map = {
-    "x": "$x$ [ft]",
-    "y": "$y$ [ft]",
-    "CRx": "CR$_x$ [ft]",
-    "dx": "$d_x$ [ft]",
-    "ex": "e$_x$ [ft]",
-    "CRy": "CR$_y$ [ft]",
-    "dy": "$d_y$ [ft]",
-    "ey": "e$_y$ [ft]",
-}
-
-# %% [markdown]
-# And now, we can get the forces in the shear walls using the rigid diaphragm assumption in \autoref{tab:rigid_forces_level5} through \autoref{tab:rigid_forces_level2}. These forces can be compared to the flexible shear wall forces obtained earlier, $F_{flex}$.
-
-# %%
-column_name_map = {
-    "torque x": "$T_x$ [lbf-ft]",
-    "torque y": "$T_y$ [lbf-ft]",
-    "dx": "$d_x$ [ft]",
-    "dy": "$d_y$ [ft]",
-    "relative wall stiffness": "$R$ [-]",
-    "torsional shear force": "$F_t$ [lbf]",
-    "direct shear force": "$F_v$ [lbf]",
-    "shear force demand": "$F_{tot}$ [lbf]",
-    "flexible shear force demand": "$F_{flex}$ [lbf]",
-}
-
-# %% [markdown]
-# ### Final Shear Wall Nailing Selection
-#
-# With the envelope procedure complete, we can now select the shear wall sheathing and nailing specifications in \autoref{tab:shear_walls_level5} through \autoref{tab:shear_walls_level2}.
-
-# %%
-column_name_map = {
-    "shear force demand": "$F_{x,cum}$ [lbf]",
-    "wall length": "$l_{wall}$ [ft]",
-    "unit shear demand": "$v$ [plf]",
-    "adjusted unit shear demand": "$0.7 v$ [plf]",
-    "adjusted unit shear capacity": "$v_{cap}$ [plf]",
-    "sheathed sides": "sides",
-    "nail spacing": "$s_{nail}$ [in]",
-}
-
-# display_table(
-#     dataframe=shear_walls,
-#     column_names_filter_and_map=column_name_map,
-#     levels="Level 5",
-#     position="H",
-#     position_float="centering",
-#     caption="Final shear wall design values - Level 5",
-#     label="tab:shear_walls_level5",
-# )
-# display_table(
-#     dataframe=shear_walls,
-#     column_names_filter_and_map=column_name_map,
-#     levels="Level 4",
-#     position="H",
-#     position_float="centering",
-#     caption="Final shear wall design values - Level 4",
-#     label="tab:shear_walls_level4",
-# )
-# display_table(
-#     dataframe=shear_walls,
-#     column_names_filter_and_map=column_name_map,
-#     levels="Level 3",
-#     position="H",
-#     position_float="centering",
-#     caption="Final shear wall design values - Level 3",
-#     label="tab:shear_walls_level3",
-# )
-# display_table(
-#     dataframe=shear_walls,
-#     column_names_filter_and_map=column_name_map,
-#     levels="Level 2",
-#     position="H",
-#     position_float="centering",
-#     caption="Final shear wall design values - Level 2",
-#     label="tab:shear_walls_level2",
-# )
-# display_table(
-#     dataframe=shear_walls,
-#     column_names_filter_and_map=column_name_map,
-#     levels="Level 1",
-#     position="H",
-#     position_float="centering",
-#     caption="Final shear wall design values - Level 1",
-#     label="tab:shear_walls_level1",
-# )
-
-# %% [markdown]
-# ### Shear Wall Axial Forces
-
-# %% [markdown]
-# #### Tension Forces
-
-# %% [markdown]
-# The shear forces get converted to overturning forces in the end posts of the shear walls. This overturning moment is counteracted by the dead load tributary to each shear wall according to ASCE 7-22 Sec. 2.4.5. The applicable equation is:
-#
-# $$
-# 0.6 D - 0.7 E_v + 0.7 E_h \quad\text{(ASCE 7-22 Eq. 2.4.5-10)}
-# $$
-#
-# There are no vertical seismic effects, $E_v$, so we will only consider the horizontal seismic effects, $E_h$, and dead loads, $D$.
-#
-# The overturning moment is:
-#
-# $$
-# M_{OT} = V h_{wall}
-# $$
-#
-# Using the area dead loads from earlier, along with the tributary areas for each shear wall, we can get the dead load that is applied to each wall. This resists the overturning moment at the centroid of the wall.
-#
-# $$
-# M_R = \frac{D l_{wall}}{2}
-# $$
-#
-# We will assume that the holddowns are 6" inset from the end posts. The tension caused by horizontal load effects counteracted by dead loads is:
-#
-# $$
-# T_{seismic} = \frac{M_{OT} - M_R}{l_{wall} - 0.5}\quad\text{(units in feet)}
-# $$
-
 # %%
 # Reduce resisting moment dead load in some walls that definitely are not correct
 trib_area_reduction_dict = {
@@ -1250,280 +963,417 @@ shear_walls = calculate_end_post_forces(
     shear_walls, float(U_floor * 1000), float(seismic_params.s_ds), wall_arm_shortening_length, trib_area_reduction_dict
 )
 shear_walls, shear_wall_schedule = assign_force_schedule(shear_walls)
-shear_walls.to_csv("shear_walls_C_new.csv")
+shear_walls = calculate_required_strap_capacity_interior_walls(shear_walls, 600)
+
+# %%
+# Rename columns for display with LaTeX formatting for units and subscripts/superscripts
+column_name_map = {
+    "level seismic force per area": "$w_{trib}$ [psf]",
+    "tributary area": "$A$ [ft$^2$]",
+    "shear demand": "$F_x$ [lbf]",
+    "flexible shear force demand": "$F_{x,cum}$ [lbf]",
+    "wall length": "$l_{wall}$ [ft]",
+    "unit shear demand": "$v$ [plf]",
+    "adjusted flexible unit shear demand": "$0.7 v$ [lbf]",
+    "adjusted flexible unit shear capacity": "$v_{cap}$ [plf]",
+    "sheathed sides flexible": "sides",
+    "nail spacing flexible": "$s_{nail}$ [in]",
+}
+
+# %%
+for direction in ["x", "y"]:
+    for level in seismic_loads.structure.shear_wall_levels[::-1]:
+        display_table(
+            dataframe=shear_walls[shear_walls["Direction"] == direction],
+            levels=level,
+            column_names_filter_and_map=column_name_map,
+            position_float="centering",
+            caption=f"Shear wall forces {direction} - Level {level}",
+            label=f"tab:shear_wall_forces_{level}_{direction}",
+            position="H",
+        )
 
 # %% [markdown]
 r"""
-## Collectors
+#### Check aspect ratios
 
-We must transfer excess shear demand into the shear walls that have a higher unit shear capacity than that of the diaphragm. This will be done by straps.
-
-Strap capacity is measured in force instead of force per length, so the necessary strap capacity can be calculated with
-
-$$
-v_s l_s - 2 v_d l_s = P_{strap}
-$$
- - $v_s =$ ASD-adjusted unit shear capacity of the shear wall
- - $v_d =$ ASD-adjusted unit shear capacity of the diaphragm
- - $l_s =$ length of the shear wall
- - $P_{strap} =$ required strap capacity
+We will also check the aspect ratios. Ensuring an aspect ratio under 2 means no strength reduction is necessary.
 """
 
-assumed_diaphragm_capacity = 215
-shear_walls["required strap capacity"] = (
-    shear_walls["adjusted diaphragm floor unit shear demand"] * shear_walls["wall length"]
-    - 2 * assumed_diaphragm_capacity * shear_walls["wall length"]
-)
-
-shear_walls["required strap capacity"] = np.where(
-    shear_walls["required strap capacity"] < 0, 0, shear_walls["required strap capacity"]
-)
-print("strap thingy")
-print(shear_walls["required strap capacity"].to_string())
-
-import sys
-
-sys.exit()
-
-shear_walls["RM"] = shear_walls["dead load"] * shear_walls["wall length"] / 2
-
-shear_walls["total moment"] = shear_walls["OTM"] - shear_walls["RM"]
-shear_walls["total moment"] = np.where(shear_walls["RM"] <= shear_walls["OTM"], shear_walls["OTM"] - shear_walls["RM"], 0)
-wall_arm_shortening_length = 0.5  # feet due to holddown positioning
-shear_walls["tension force"] = shear_walls["total moment"] / (shear_walls["wall length"] - wall_arm_shortening_length)
-num_bins = 5
-shear_walls["binned tension force"] = (
-    shear_walls["tension force"]
-    .groupby(level="Level")
-    .transform(lambda s: pd.qcut(s, q=num_bins, duplicates="drop").map(lambda x: x.right if pd.notna(x) else 0))
-)
-
-# %% [markdown]
-# #### Compression Forces
-
-# %% [markdown]
-# We will calculate the compression forces in a very similar way. However, we will ignore the resisting moment.
-#
-# The live load, $L$, is $40$ psf, while the snow load, $S$, is $25$ psf and applies only to corridor walls as that is how the roof trusses are supported.
-#
-# $$
-# C_{seismic} = \frac{M_{OT}}{l_{wall} - 0.5}\quad\text{(units in feet)}
-# $$
+# %%
+# %%render
+ratio_max = check_value(shear_walls["aspect ratio"].max(), 2, "<")
 
 # %%
-shear_walls["compression force"] = shear_walls["OTM"] / (shear_walls["wall length"] - wall_arm_shortening_length)
-shear_walls["binned compression force"] = (
-    shear_walls["compression force"]
-    .groupby(level="Level")
-    .transform(lambda s: pd.qcut(s, q=num_bins).map(lambda x: x.right if pd.notna(x) else 0))
-    # .transform(lambda s: pd.qcut(s, q=num_bins, duplicates="drop").map(lambda x: x.right if pd.notna(x) else pd.NA))
-)
+if "OK" in ratio_max:
+    display_text(r"$\therefore$ All aspect ratios are OK")
+else:
+    display_text("The aspect ratio knockdown factor must be applied.")
 
 # %% [markdown]
-# The tension and compression forces in each wall are shown in the following tables.
+r"""
+### Rigid Diaphragm Assumption
+
+With a rigid diaphragm assumption, we now must calculate the following in each direction:
+
+1. The relative stiffnesses of the shear walls to obtain a center of rigidity.
+2. The center of mass of the diaphragm with the center of rigidity to obtain an eccentricity.
+
+The relative stiffnesses of the shear walls can be calculated by using the deflection equation from NDS SDPWS Sec. 4.3.4
+
+\begin{align*}
+k &= \frac{F}{\delta},\, \text{assume }F = \text{induced load demand in the shear wall} \\
+\delta_{sw} &= \frac{8vh^3}{EAb} + \frac{vh}{1000 G_a} + \frac{h \Delta_A}{b}\quad \text{(SDPWS Eq. 4.3-1)}
+\end{align*}
+
+where
+
+- $b =$ the shear wall length [ft]
+- $\Delta_A =$ vertical deformation of the wall overturning anchorage system + vertical compression deformation [in]
+- $E =$ modulus of elasticity of end posts [psi]
+- $A =$ area of end post cross-section [in$^2$]
+- $G_a =$ apparent shear wall shear stiffness from nail slip and panel shear deformation [kip/in]
+- $h =$ shear wall height [ft]
+- $v =$ unit shear force induced by the design load [plf]
+- $\delta_{sw} =$ maximum shear wall deflection determined by elastic analysis [in]
+
+Note that for the following calculations, we will conservatively use the unit shear force induced by the nominal load, not the design load, for the value of $v$. This is because the stiffnesses obtained from this use will allow us to use the stiffnesses for deflection limits and story drift calculations
+
+We will assume that the end posts are (2) 2x4 Douglas Fir No. 2; this means:
+"""
+
+# %%
+# %%render
+E_endpost = E_endpost  # psi
+A_endpost = A_endpost  # in$^2$
+
+# %% [markdown]
+r"""
+We will assume a continuous tiedown rod system. A conservative first-pass value for $\Delta_A$ can be:
+"""
+
+# %%
+# %%render params
+Delta_A = Delta_A  # in
+
+# %% [markdown]
+r"""
+#### Shear Wall Rigidities
+
+With the deflections of each shear wall, along with the force demand of each shear wall, we can obtain the stiffnesses (and therefore, relative stiffnesses) of all the walls.
+
+Each relative stiffness is relative to the level. The sum of all relative stiffnesses on each level is $1.0$.
+
+\begin{align*}
+k &= \frac{F_x}{\delta_{sw}} \\
+R &= \frac{k_{wall}}{\sum {k_{wall}}}
+\end{align*}
+"""
 
 # %%
 column_name_map = {
-    "tension force": "$T$ [lbf]",
-    "compression force": "$C$ [lbf]",
+    "cumulative shear demand": "$F_x$ [lbf]",
+    "delta_sw": r"$\delta_{sw}$ [in]",
+    "wall stiffness": "$k$ [lbf/in]",
+    "relative wall stiffness": "$R$ [-]",
 }
-
-display_table(
-    dataframe=shear_walls,
-    column_names_filter_and_map=column_name_map,
-    levels="Level 5",
-    position="H",
-    position_float="centering",
-    caption="Shear wall axial forces - Level 5",
-    label="tab:shear_walls_axial_level5",
-)
-display_table(
-    dataframe=shear_walls,
-    column_names_filter_and_map=column_name_map,
-    levels="Level 4",
-    position="H",
-    position_float="centering",
-    caption="Shear wall axial forces - Level 4",
-    label="tab:shear_walls_axial_level4",
-)
-display_table(
-    dataframe=shear_walls,
-    column_names_filter_and_map=column_name_map,
-    levels="Level 3",
-    position="H",
-    position_float="centering",
-    caption="Shear wall axial forces - Level 3",
-    label="tab:shear_walls_axial_level3",
-)
-display_table(
-    dataframe=shear_walls,
-    column_names_filter_and_map=column_name_map,
-    levels="Level 2",
-    position="H",
-    position_float="centering",
-    caption="Shear wall axial forces - Level 2",
-    label="tab:shear_walls_axial_level2",
-)
-display_table(
-    dataframe=shear_walls,
-    column_names_filter_and_map=column_name_map,
-    levels="Level 1",
-    position="H",
-    position_float="centering",
-    caption="Shear wall axial forces - Level 1",
-    label="tab:shear_walls_axial_level1",
-)
-
-# %% [markdown]
-# #### Holddown Forces Table
-#
-# With the tension and compression forces calculated, we can construct a table of the forces for each level. We will default to 5 bins for each level to give us options A through E.
-#
-# However, there is only one table in the plans for all the holddown forces, so these will all get compared together as an aggregate of all buildings and simplified further.
-
-# %%
-NUM_OPTIONS = 5
-LABELS = list("ABCDE")
-
-schedule_rows = []
-
-
-def assign_schedule(group):
-    group = group.copy()
-
-    level = group.index.get_level_values("Level")[0]
-
-    n = len(group)
-    group["_bin"] = np.floor(np.arange(n) * min(NUM_OPTIONS, n) / n)
-
-    schedule = (
-        group.groupby("_bin")
-        .agg(
-            tension=("tension force", "max"),
-            compression=("compression force", "max"),
+for direction in ["x", "y"]:
+    for level in seismic_loads.structure.shear_wall_levels[::-1]:
+        display_table(
+            dataframe=shear_walls[shear_walls["Direction"] == direction],
+            levels=level,
+            column_names_filter_and_map=column_name_map,
+            position_float="centering",
+            caption=f"Wall rigidities {direction} - Level {level}",
+            label=f"tab:wall_rigidities_{direction}_{level}",
+            position="H",
         )
-        .reset_index()
-    )
 
-    # convert to kips
-    schedule["tension"] /= 1000
-    schedule["compression"] /= 1000
+# %% [markdown]
+r"""
+#### Center of Rigidity and Center of Mass
 
-    # sort ONLY schedule
-    schedule["governing"] = schedule[["tension", "compression"]].max(axis=1)
-    schedule = schedule.sort_values("governing").reset_index(drop=True)
+We can find the center of rigidity by taking the weighted sum of all wall stiffnesses and their locations relative to a datum.
 
-    # assign A–E
-    schedule["option"] = LABELS[: len(schedule)]
+$$
+\bar{x}_r = \frac{\sum k_{ns} x}{\sum k_{ns}},\, \bar{y}_r = \frac{\sum k_{ew} y}{\sum k_{ew}}
+$$
 
-    # IMPORTANT: keep level in schedule
-    schedule["Level"] = level
+Note: each wall is assumed to have zero rigidity in the direction perpendicular to them.
 
-    # map bins → options
-    bin_to_option = dict(zip(schedule["_bin"], schedule["option"]))
-    group["option"] = group["_bin"].map(bin_to_option)
+An accidental torsion eccentricity of 5% must be added/subtracted.
+"""
 
-    schedule_map = schedule.set_index("option")[["tension", "compression"]]
+# %%
+# %%render
+CM_x__a__plus = CM_x + X_plan * 0.05
+CM_x__a__minus = CM_x - X_plan * 0.05
+CM_y__a__plus = CM_y + Y_plan * 0.05
+CM_y__a__minus = CM_y - Y_plan * 0.05
 
-    group["binned tension force"] = group["option"].map(schedule_map["tension"])
-    group["binned compression force"] = group["option"].map(schedule_map["compression"])
+# %% [markdown]
+r"""
+The eccentricity used is determined by the location of the wall in relation to the center of rigidity. Since the wall rotates about the center of rigidity, we want to position the center of mass to ensure each wall is getting the maximum possible force to be conservative. If the center of mass is positioned on the opposite side of the center of rigidity relative to the wall in uestion, that mass will _decrease_ the shear experienced by that wall.
 
-    schedule_rows.append(schedule[["Level", "option", "tension", "compression"]])
+This means we always want the center of mass to be on the same side of the center of rigidity as the wall. The eccentricities shown in the following tables are based on the worst-case scenario. This is not immediately obvious due to all torues being given a positive value.
 
-    return group.drop(columns=["_bin"])
+How the center of rigidity, center of mass, and eccentricity interact are illustrated in \autoref{fig:rigid_diaphragm_moments}. The moments generated by the rotation of the center of mass around the center of rigidity differ based on the chosen eccentricity.
 
+$$
+d_x = \left| x - \text{CR}_x \right|\text{ and }\, d_y = \left| y - \text{CR}_y \right|
+$$
+"""
 
-shear_walls = shear_walls.groupby(level="Level", group_keys=False).apply(assign_schedule)
-
-schedule_df = (
-    pd.concat(schedule_rows, ignore_index=True)
-    .rename(
-        columns={
-            "tension": "binned tension force",
-            "compression": "binned compression force",
-        }
-    )
-    .set_index(["Level", "option"])
-    .sort_index()
+# %%
+display_figure(
+    image_path("rigid_diaphragm_moments"),
+    caption="Moments applied to a rigid diaphragm",
+    label="fig:rigid_diaphragm_moments",
+    width="50%",
 )
 
 # %%
 column_name_map = {
-    "binned tension force": "$T$ [kip]",
-    "binned compression force": "$C$ [kip]",
+    "x": "$x$ [ft]",
+    "y": "$y$ [ft]",
+    "CRx": "CR$_x$ [ft]",
+    "dx": "$d_x$ [ft]",
+    "ex": "e$_x$ [ft]",
+    "CRy": "CR$_y$ [ft]",
+    "dy": "$d_y$ [ft]",
+    "ey": "e$_y$ [ft]",
 }
-display_table(
-    schedule_df,
-    column_names_filter_and_map=column_name_map,
-    position_float="centering",
-    position="H",
-    caption="Holddown Schedule",
-    label="tab:holddown_schedule",
-)
+for level in seismic_loads.structure.shear_wall_levels[::-1]:
+    display_table(
+        dataframe=shear_walls,
+        column_names_filter_and_map=column_name_map,
+        levels=level,
+        position_float="centering",
+        formatter_functions=[lambda value: sig_figs(value, sig_figs=4)],
+        caption=f"Center of Rigidity - Level {level}",
+        label=f"tab:center_of_rigidity_{level}",
+        position="H",
+    )
 
 # %% [markdown]
-# ## Diaphragm Design
-
-# %% [markdown]
-# We must first get the diaphragm inertial design forces. These are distinct from the seismic forces determined in \autoref{tab:seismic_forces_calculation_table}.
-#
-# \begin{align*}
-# F_{px} &= \frac{\sum_{i=x}^n F_i}{\sum_{i=x}^n w_i} w_{px} \quad \text{(ASCE Eq. 12.10-1)} \\
-# F_{px} &\ge 0.2 S_{DS} I_e w_{px} \quad \text{(ASCE Eq. 12.10-2)} \\
-# F_{px} &\le 0.4 S_{DS} I_e w_{px}  \quad \text{(ASCE Eq. 12.10-3)}
-# \end{align*}
-#
-# These forces are shown in \autoref{tab:diaphragm_forces}
-
-# %%
-seismic_loads["cumulative floor weight"] = seismic_loads.iloc[::-1]["floor weight"].cumsum()
-seismic_loads["F_x,cum"] = seismic_loads.iloc[::-1]["F_x"].cumsum()
-seismic_loads["F_px lower bound"] = 0.2 * S_DS * I_e * seismic_loads["floor weight"]
-seismic_loads["F_px upper bound"] = 0.4 * S_DS * I_e * seismic_loads["floor weight"]
-seismic_loads["F_px initial"] = (
-    seismic_loads["F_x,cum"] / seismic_loads["cumulative floor weight"] * seismic_loads["floor weight"]
-)
-
-# Assign F_px with limits from ASCE
-seismic_loads["F_px"] = np.where(
-    seismic_loads["F_px initial"] <= seismic_loads["F_px lower bound"],
-    seismic_loads["F_px lower bound"],
-    np.where(
-        seismic_loads["F_px initial"] >= seismic_loads["F_px upper bound"],
-        seismic_loads["F_px upper bound"],
-        seismic_loads["F_px initial"],
-    ),
-)
+r"""
+And now, we can get the forces in the shear walls using the rigid diaphragm assumption. These forces can be compared to the flexible shear wall forces obtained earlier, $F_{flex}$.
+"""
 
 # %%
 column_name_map = {
-    "floor weight": "$w_{px}$ [kip]",
-    "cumulative floor weight": r"$\sum w_x$ [kip]",
-    "F_x,cum": r"$\sum F_x$ [kip]",
-    "F_px initial": "$F_{px,init}$ [kip]",
-    "F_px lower bound": "$F_{px,lower}$ [kip]",
-    "F_px upper bound": "$F_{px,upper}$ [kip]",
-    "F_px": "$F_{px}$ [kip]",
+    "torque x": "$T_x$ [lbf-ft]",
+    "torque y": "$T_y$ [lbf-ft]",
+    "dx": "$d_x$ [ft]",
+    "dy": "$d_y$ [ft]",
+    "relative wall stiffness": "$R$ [-]",
+    "torsional shear force": "$F_t$ [lbf]",
+    "direct shear force": "$F_v$ [lbf]",
+    "shear force demand": "$F_{tot}$ [lbf]",
+    "flexible shear force demand": "$F_{flex}$ [lbf]",
 }
+for level in seismic_loads.structure.shear_wall_levels[::-1]:
+    display_table(
+        dataframe=shear_walls,
+        column_names_filter_and_map=column_name_map,
+        levels=level,
+        position_float="centering",
+        formatter_functions=[lambda value: sig_figs(value, sig_figs=4)],
+        caption=f"Shear wall forces with the rigid diaphragm assumption - Level {level}",
+        label=f"tab:rigid_forces_{level}",
+        position="H",
+    )
+
+# %% [markdown]
+r"""
+### Final Shear Wall Nailing Selection
+
+With the envelope procedure complete, we can now select the shear wall sheathing and nailing specifications.
+"""
+
+# %%
+column_name_map = {
+    "shear force demand": "$F_{x,cum}$ [lbf]",
+    "wall length": "$l_{wall}$ [ft]",
+    "unit shear demand": "$v$ [plf]",
+    "adjusted unit shear demand": "$0.7 v$ [plf]",
+    "adjusted unit shear capacity": "$v_{cap}$ [plf]",
+    "sheathed sides": "sides",
+    "nail spacing": "$s_{nail}$ [in]",
+}
+
+for level in seismic_loads.structure.shear_wall_levels[::-1]:
+    display_table(
+        dataframe=shear_walls,
+        column_names_filter_and_map=column_name_map,
+        levels=level,
+        position_float="centering",
+        caption=f"Final shear wall design values - Level {level}",
+        label=f"tab:shear_walls_{level}",
+        position="H",
+    )
+
+# %% [markdown]
+r"""
+### Shear Wall Axial Forces
+
+#### Tension Forces
+
+The shear forces get converted to overturning forces in the end posts of the shear walls. This overturning moment is counteracted by the dead load tributary to each shear wall according to ASCE 7-22 Sec. 2.4.5. The governing load combination equation is:
+
+\begin{align*}
+&0.6 D - 0.7 E_v + 0.7 E_h \qquad\text{(ASCE 7-22 Eq. 2.4.5-10)}
+\end{align*}
+
+Using the area dead loads from earlier, along with the tributary areas for each shear wall, we can get the dead load that is applied to each wall. This resists the overturning moment at the centroid of the wall.
+
+For high-aspect-ratio walls, we can assume that the wall acts rigidly, thus:
+
+\begin{align*}
+M_R &= D \frac{l_{wall}}{2}\quad\text{(units in kips and feet)} \\
+D &= 0.6 D_{nominal}
+\end{align*}
+
+However, for longer (low aspect ratio) walls, the wall will not behave rigidly. We can only assume a portion of the vertical loading is transferred to the end posts; the rest is resolved through the wall studs. We will assume that a high aspect ratio is anything over 1:1; therefore, we will take the length of dead load being resisted as equal to the height of the wall.
+
+\begin{align*}
+M_R &= \left( D * \text{min}\left[ \frac{h_{wall}}{l_{wall}},\quad 1 \right] \right) \frac{l_{wall}}{2}\quad\text{(units in kips and feet)} \\
+D &= 0.6 D_{nominal}
+\end{align*}
+
+The vertical seismic effect is taken as, $E_v = 0.2 S_{DS} D$ (units in kips), so the dead load length for the low aspect-ratio walls is also used.
+
+\begin{align*}
+P_v &= 0.7 (0.2 S_{DS} D_{nominal})
+\end{align*}
+
+The overturning moment is:
+
+\begin{align*}
+M_{OT} &= V h_{wall} + P_v \frac{l_{wall}}{2} \quad\text{(units in kips and feet)} \\
+V &= 0.7 V_{nominal}
+\end{align*}
+
+We will assume that the holddowns are 6" inset from the end posts. The ASD tension caused by horizontal load effects counteracted by dead loads is:
+
+$$
+T_{seismic} = \frac{M_{OT} - M_R}{l_{wall} - 0.5}\quad\text{(units in kips and feet)}
+$$
+"""
+
+# %%
+column_name_map = {
+    "tension wall vertical load length": "$l_{grav}$ [ft]",
+    "horizontal effects moment lc10": "$M_{Eh}$ [lbf-ft]",
+    "vertical effects moment lc10": "$M_{Ev}$ [lbf-ft]",
+    "dead effects moment lc10": "$M_{D}$ [lbf-ft]",
+    "tension force": "$T_{seismic}$ [lbf]",
+}
+for level in seismic_loads.structure.shear_wall_levels[::-1]:
+    display_table(
+        dataframe=shear_walls,
+        column_names_filter_and_map=column_name_map,
+        levels=level,
+        position_float="centering",
+        caption=f"End post tension forces - Level {level}",
+        label=f"tab:tension_forces_{level}",
+        position="H",
+    )
+
+# %% [markdown]
+r"""
+#### Compression Forces
+
+We will calculate the ASD compression forces in a very similar way. 
+
+One significant change will be the additional gravity loads (D, L, and S). The bearing studs in the shear wall are designed to take the compressive gravity load across the length of the wall, so the tributary width for the gravity loads into the compression stud will come from the width of one stud bay (i.e., the end stud bay tributary to the end post in compression).
+
+The governing load combination for compression is one of the following:
+
+\begin{align*}
+1.0 D + 0.7 E_v + 0.7 E_h \qquad\text{(ASCE 7-22 Eq. 2.4.5-8)} \\
+1.0 D + 0.525 E_v + 0.525 E_h + 0.75 L + 0.1 S \qquad\text{(ASCE 7-22 Eq. 2.4.5-9)}
+\end{align*}
+
+The vertical seismic effect is taken as, $E_v = 0.2 S_{DS} D$.
+
+The live load is taken as $L = 40$ psf, while the snow load is taken as $S = 25$ psf.
+"""
+
+# %%
+column_name_map = {
+    "compression wall vertical load length": "$l_{grav}$ [ft]",
+    "net moment lc8": "$M_{eq8}$ [lbf-ft]",
+    "net moment lc9": "$M_{eq9}$ [lbf-ft]",
+    "compression force": "$T_{seismic}$ [lbf]",
+}
+for level in seismic_loads.structure.shear_wall_levels[::-1]:
+    display_table(
+        dataframe=shear_walls,
+        column_names_filter_and_map=column_name_map,
+        levels=level,
+        position_float="centering",
+        caption=f"End post compression forces - Level {level}",
+        label=f"tab:compression_forces_{level}",
+        position="H",
+    )
+
+# %% [markdown]
+r"""
+## Diaphragm Design
+
+We must first get the diaphragm inertial design forces. These are distinct from the seismic forces determined earlier.
+
+\begin{align*}
+F_{px} &= \frac{\sum_{i=x}^n F_i}{\sum_{i=x}^n w_i} w_{px} \quad \text{(ASCE Eq. 12.10-1)} \\
+F_{px} &\ge 0.2 S_{DS} I_e w_{px} \quad \text{(ASCE Eq. 12.10-2)} \\
+F_{px} &\le 0.4 S_{DS} I_e w_{px}  \quad \text{(ASCE Eq. 12.10-3)}
+\end{align*}
+
+These forces are shown in \autoref{tab:diaphragm_forces}
+"""
+
+# %%
+column_name_map = seismic_loads.column_name_map
+del column_name_map["level height"]
+del column_name_map["level elevation"]
+del column_name_map["level weighting parameter"]
+del column_name_map["vertical distribution factor"]
+del column_name_map["lateral seismic force"]
+del column_name_map["seismic design story shear"]
+del column_name_map["overturning moment"]
+diaphragm_loads_x = seismic_loads.seismic_loads_x
+diaphragm_loads_y = seismic_loads.seismic_loads_y
 display_table(
-    dataframe=seismic_loads.iloc[:0:-1],
+    dataframe=diaphragm_loads_x.iloc[::-1],
     column_names_filter_and_map=column_name_map,
     position_float="centering",
-    caption="Diaphragm Forces",
-    position="H",
+    caption="Diaphragm Forces - x",
     label="tab:diaphragm_forces",
+    position="H",
+)
+display_table(
+    dataframe=diaphragm_loads_y.iloc[::-1],
+    column_names_filter_and_map=column_name_map,
+    position_float="centering",
+    caption="Diaphragm Forces - y",
+    label="tab:diaphragm_forces",
+    position="H",
 )
 
 # %% [markdown]
-# With these diaphragm forces, we can design the diaphragm for the worst-case cantilever and simply-supported conditions.
-#
-# The longest simply-supported span in the N-S direction is about 34.5 feet, while the longest cantilever span is about 32 feet. The depth of the diaphragm in the N-S direction is 67 feet. The longest simply-supported span in the E-W direction is about 5.5 feet, while the longest cantilever span is about 31 feet. The depth of the diaphragm in the E-W direction is 230 feet.
-#
-# Diaphragm unit shear demands are shown in \autoref{tab:diaphragm_unit_shears}
+r"""
+With these diaphragm forces, we can design the diaphragm for the worst-case cantilever and simply-supported conditions.
+
+The longest simply-supported span in the N-S direction is about 34.5 feet, while the longest cantilever span is about 32 feet. The depth of the diaphragm in the N-S direction is 67 feet. The longest simply-supported span in the E-W direction is about 5.5 feet, while the longest cantilever span is about 31 feet. The depth of the diaphragm in the E-W direction is 230 feet.
+
+Diaphragm unit shear demands are shown in \autoref{tab:diaphragm_unit_shears}
+"""
 
 # %%
 # Set up diaphragm dataframe
-levels = ["Level 5", "Level 4", "Level 3", "Level 2", "Level 1"]
+levels = seismic_loads.structure.diaphragm_levels[::-1]
+diaphragm_loads_y = seismic_loads.seismic_loads_y
 directions = ["N-S", "E-W"]
 index = pd.MultiIndex.from_product(
     [levels, directions],
@@ -1534,10 +1384,10 @@ diaphragms_ns = diaphragms.xs("N-S", level="Direction").copy()
 diaphragms_ew = diaphragms.xs("E-W", level="Direction").copy()
 
 # %%
-diaphragms_ns["F_px"] = seismic_loads["F_px"] * 1000
-diaphragms_ns["area load"] = diaphragms_ns["F_px"] / float(A_level)
-diaphragms_ns["L_simp"] = 35
-diaphragms_ns["L_cant"] = 35
+diaphragms_ns["diaphragm design force"] = diaphragm_loads_y["diaphragm design force"] * 1000
+diaphragms_ns["area load"] = diaphragms_ns["diaphragm design force"] / float(A_level)
+diaphragms_ns["L_simp"] = 34.5
+diaphragms_ns["L_cant"] = 32
 diaphragms_ns["depth"] = 67
 diaphragms_ns["V_simp"] = diaphragms_ns["area load"] * diaphragms_ns["depth"] * diaphragms_ns["L_simp"] / 2
 diaphragms_ns["V_cant"] = diaphragms_ns["area load"] * diaphragms_ns["depth"] * diaphragms_ns["L_cant"]
@@ -1545,22 +1395,22 @@ diaphragms_ns["v_simp"] = diaphragms_ns["V_simp"] / diaphragms_ns["depth"]
 diaphragms_ns["v_cant"] = diaphragms_ns["V_cant"] / diaphragms_ns["depth"]
 
 # %% [markdown]
-# We will assume the diaphragm sheathing has the following properties:
-#
-# - Unblocked
-# - WSP Sheathing
-# - 15/32" thick
-# - 10d common nails
-# - Plywood
-# - Nailed face is 2"
-# - Edge adjoining cases 2 through 6
-#
-# The diaphragm capacity checks for this chosen sheathing are shown in \autoref{tab:diaphragm_capacities}
+r"""
+We will assume the diaphragm sheathing has the following properties:
+
+- Unblocked
+- WSP Sheathing
+- 15/32" thick
+- 10d common nails
+- Plywood
+- Nailed face is 2"
+- Edge adjoining cases 2 through 6
+
+The diaphragm capacity checks for this chosen sheathing are shown in \autoref{tab:diaphragm_capacities}
+"""
 
 # %%
 # Set baseline sheathing properties. We set the number of sheathed sides later
-from structural_tools.seismic.sheathing import SheathingApplication
-
 diaphragm_sheathing = Sheathing(
     sheathing_material=SheathingMaterial.WSP_SHEATHING,
     minimum_nominal_panel_thickness=15 / 32,
@@ -1579,10 +1429,11 @@ diaphragms_ns[["adjusted unit shear capacity cantilever", "shear stiffness canti
 )
 
 # %%
-diaphragms_ew["F_px"] = seismic_loads["F_px"] * 1000
-diaphragms_ew["area load"] = diaphragms_ew["F_px"] / float(A_level)
+diaphragm_loads_x = seismic_loads.seismic_loads_x
+diaphragms_ew["diaphragm design force"] = diaphragm_loads_x["diaphragm design force"] * 1000
+diaphragms_ew["area load"] = diaphragms_ew["diaphragm design force"] / float(A_level)
 diaphragms_ew["L_simp"] = 5.5
-diaphragms_ew["L_cant"] = 35
+diaphragms_ew["L_cant"] = 31
 diaphragms_ew["depth"] = X_plan
 diaphragms_ew["V_simp"] = diaphragms_ew["area load"] * diaphragms_ew["depth"] * diaphragms_ew["L_simp"] / 2
 diaphragms_ew["V_cant"] = diaphragms_ew["area load"] * diaphragms_ew["depth"] * diaphragms_ew["L_cant"]
@@ -1610,7 +1461,7 @@ diaphragms.update(diaphragms_ew)
 
 # %%
 column_name_map = {
-    "F_px": "$F_{px}$ [lbf]",
+    "diaphragm design force": "$F_{px}$ [lbf]",
     "area load": "$w$ [psf]",
     "V_simp": "$V_{simp}$ [lbf]",
     "V_cant": "$V_{cant}$ [lbf]",
@@ -1621,9 +1472,9 @@ display_table(
     dataframe=diaphragms,
     column_names_filter_and_map=column_name_map,
     position_float="centering",
-    position="H",
     caption="Diaphragm Unit Shear Demands",
     label="tab:diaphragm_unit_shears",
+    position="H",
 )
 
 # %%
@@ -1639,9 +1490,9 @@ display_table(
     dataframe=diaphragms,
     column_names_filter_and_map=column_name_map,
     position_float="centering",
-    position="H",
     caption="Diaphragm Capacity Checks",
     label="tab:diaphragm_capacities",
+    position="H",
 )
 
 # %%
@@ -1651,98 +1502,55 @@ else:
     display_text("You must check for new diaphragm nailing.")
 
 # %% [markdown]
-# ## Story Drift Determination
+r"""
+## Story Drift Determination
 
-# %% [markdown]
-# The inelastic design story drift is calculated as the difference in deflections between stories at their centers of mass.
+The inelastic design story drift is calculated as the difference in deflections between stories at their centers of mass.
 
-# %% [markdown]
-# We can find the shear wall line that is closest to the center of mass, then take the cumulative force on that line and divide it by the cumulative wall stiffness on that line. This will give us an approximate elastic story drift that will then be converted to inelastic story drift with $C_d$ and $I_e$.
-#
-# Note that this is a conservative estimation of inelastic story drift due to assuming the deflection of a single shear wall line, rather than the full deflection of the diaphragm as a rigid unit.
+We can get the elastic story drift at the center of mass by simply dividing the total story shear by the total wall stiffness in the relevant direction. Then, we can use the equation for inelastic story drift from ASCE 7.
 
-# %% [markdown]
-# \begin{align*}
-#     \delta_{xe} &= F/k \\
-#     \delta_x &= \frac{C_d \delta_{xe}}{I_e}
-# \end{align*}
+\begin{align*}
+    \delta_{xe} &= F/k \\
+    \delta_{DE} &= \frac{C_d \delta_{xe}}{I_e} + \delta_{di}
+\end{align*}
 
-# %%
-# %%render
-C_d
-I_e
+For buildings with a torsional irregularity ratio of over 1.2, we must calculate the accidental torsional ampliciation factor, $A_x$, in each direction, then amplify the accidental moment by that factor. All shear design forces values are recalculated with this value.
 
-# %%
-shear_walls["line"] = flexible["line"]
-shear_walls["wall stiffness"] = rigid["wall stiffness"]
-shear_walls["cumulative shear demand"] = flexible["cumulative shear demand"]
-shear_walls["x"] = rigid["x"]
-shear_walls["y"] = rigid["y"]
-shear_walls["delta_sw"] = rigid["delta_sw"]
+We must also look at the edges of the rigid diaphragm for these buildings with the $TIR>2$. The story drift for these buildings is the greatest difference between the edges of the structure at each level and not just at the center of mass. There are 8 different possitibilities that will be simplified into one number (max):
 
+1. far left edge, counter-clockwise rotation, EW forces
+2. far right edge, counter-clockwise rotation, EW forces
+3. far left edge, counter-clockwise rotation, NS forces
+4. far right edge, counter-clockwise rotation, NS forces
+5. far left edge, clockwise rotation, EW forces
+6. far right edge, clockwise rotation, EW forces
+7. far left edge, clockwise rotation, NS forces
+8. far right edge, clockwise rotation, NS forces
 
-def line_deflection(group, line):
-    line_walls = group[group["line"] == line]
-
-    total_stiffness = line_walls["wall stiffness"].sum()
-    total_shear = line_walls["cumulative shear demand"].sum()
-
-    return total_shear / total_stiffness
-
-
-def get_cm_line_deflection(group, CM_x, CM_y, C_d, I_e):
-    x_wall = group.loc[(group["x"] - CM_x).abs().idxmin()]
-
-    y_wall = group.loc[(group["y"] - CM_y).abs().idxmin()]
-
-    x_line = x_wall["line"]
-    y_line = y_wall["line"]
-
-    x_delta_sw = line_deflection(group, x_line)
-    y_delta_sw = line_deflection(group, y_line)
-
-    drift_factor = C_d / I_e
-
-    return pd.Series(
-        {
-            "x line": x_line,
-            "x delta_sw": x_delta_sw,
-            "x inelastic drift": x_delta_sw * drift_factor,
-            "y line": y_line,
-            "y delta_sw": y_delta_sw,
-            "y inelastic drift": y_delta_sw * drift_factor,
-        }
-    )
-
-
-story_drift = shear_walls.groupby(level="Level", sort=False).apply(
-    get_cm_line_deflection,
-    CM_x=CM_x,
-    CM_y=CM_y,
-    C_d=C_d,
-    I_e=I_e,
-)
-story_drift["allowable story drift"] = seismic_loads["floor height"] * 0.02 * 12
+Note: it is taken into account that $TIR>1.4$ in both directions results in $\rho = 1.3$. The value of $\rho$ is increased to 1.3 when necessary.
+"""
 
 # %%
 column_name_map = {
-    "x line": "N-S line",
-    "x delta_sw": r"$\delta_{xe,ns}$ [in]",
-    "x inelastic drift": r"$\delta_{x,ns}$ [in]",
-    "y line": "E-W line",
-    "y delta_sw": r"$\delta_{xe,ew}$ [in]",
-    "y inelastic drift": r"$\delta_{x,ew}$ [in]",
-    "allowable story drift": r"$\Delta_a$ [in]",
+    "Direction": "Direction",
+    "torsional irregularity ratio": r"TIR [-]",
+    "accidental torsional amplification factor x": r"$A_x$ [-]",
+    "accidental torsional amplification factor y": r"$A_y$ [-]",
+    "elastic story drift x": r"max $\delta_{elastic}$ [ft]",
+    "inelastic story drift x": r"max $\delta_{DE}$ [ft]",
+    "allowable story drift": r"$\Delta_{allow}$ [ft]",
 }
-display_table(
-    story_drift,
-    column_names_filter_and_map=column_name_map,
-    position_float="centering",
-    position="H",
-    caption="Story Drifts",
-    label="tab:story_drifts",
-)
+for level in seismic_loads.structure.shear_wall_levels[::-1]:
+    display_table(
+        shear_walls,
+        levels=level,
+        column_names_filter_and_map=column_name_map,
+        position_float="centering",
+        caption=f"Story Drifts - Level {level}",
+        label=f"tab:story_drifts_{level}",
+        position="H",
+    )
 
 # %%
 # Save dataframes to CSV
-shear_walls.to_csv("shear_walls_C.csv")
+shear_walls.to_csv(f"{runtime.identifier}.csv")
